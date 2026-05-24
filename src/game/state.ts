@@ -1,6 +1,6 @@
-import { cards, enemies, events, rewardCardPool } from "./content";
+import { cards, enemies, events, loadContentPack } from "./content";
 import { mulberry32, pick, shuffle, uid } from "./rng";
-import type { CardDefinition, CardInstance, CombatState, Effect, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, Reward, RunState, StatusEffect } from "./types";
+import type { CardDefinition, CardInstance, CombatState, ContentPack, Effect, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicEffect, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
 export const SAVE_VERSION = 1;
@@ -12,18 +12,25 @@ export function makeCard(cardId: string, upgraded = false): CardInstance {
 }
 
 export function cardDef(card: CardInstance): CardDefinition {
-  return cards[card.cardId];
+  return loadContentPack().cards[card.cardId] ?? cards[card.cardId];
+}
+
+export function cardDefFrom(card: CardInstance, pack: ContentPack): CardDefinition {
+  return pack.cards[card.cardId] ?? cards[card.cardId];
 }
 
 export function newRun(seed = Date.now()): RunState {
+  const contentPack = loadContentPack();
   const random = mulberry32(seed);
   const deck = starterDeckIds.map((id) => makeCard(id));
   const map = generateMap(random);
-  return {
+  const run: RunState = {
     saveVersion: SAVE_VERSION,
     seed,
     screen: "map",
+    contentPack,
     player: { maxHp: 72, hp: 72, block: 0, energy: 3, maxEnergy: 3, gold: 60, statuses: [] },
+    relics: contentPack.relics.cracked_core ? ["cracked_core"] : [],
     deck,
     map,
     currentNodeId: "start",
@@ -32,6 +39,8 @@ export function newRun(seed = Date.now()): RunState {
     message: "The net opens. Choose a neighboring node.",
     victory: false
   };
+  applyRelics(run, "runStart");
+  return run;
 }
 
 export function saveRun(run: RunState) {
@@ -158,12 +167,14 @@ export function completeNode(run: RunState): RunState {
 export function startCombat(run: RunState, nodeType: NodeType): CombatState {
   const random = mulberry32(run.seed + run.movesTaken * 97);
   const tier = nodeType === "boss" ? "boss" : nodeType === "elite" ? "elite" : "normal";
-  const candidates = enemies.filter((enemy) => enemy.tier === tier);
+  const candidates = getContentPack(run).enemies.filter((enemy) => enemy.tier === tier);
   const count = tier === "normal" && random() > 0.45 ? 2 : 1;
   const enemyStates = Array.from({ length: count }, () => toEnemyState(pick(candidates, random), run.threat));
   const drawPile = shuffle(run.deck.map((card) => ({ ...card })), random);
   const combat: CombatState = { enemies: enemyStates, drawPile, hand: [], discardPile: [], exhaustPile: [], turn: 1, log: ["Draw your opening hand."] };
   drawCards(combat, 5, random);
+  const next = { ...run, combat };
+  applyRelics(next, "combatStart");
   return combat;
 }
 
@@ -194,13 +205,14 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
   const index = combat.hand.findIndex((card) => card.uid === cardUid);
   if (index < 0) return run;
   const card = combat.hand[index];
-  const def = cardDef(card);
+  const def = cardDefFrom(card, getContentPack(next));
   if (def.type === "status" || def.type === "curse" || next.player.energy < def.cost) return run;
   const target = targetEnemyId ? combat.enemies.find((enemy) => enemy.instanceId === targetEnemyId) : combat.enemies[0];
   next.player.energy -= def.cost;
   combat.hand.splice(index, 1);
   const effects = card.upgraded ? def.upgradedEffects : def.effects;
   effects.forEach((effect) => applyEffect(next, effect, target));
+  applyRelics(next, "cardPlayed");
   if (def.id === "harvest" && target && target.hp <= 0) next.player.gold += card.upgraded ? 12 : 8;
   combat.enemies = combat.enemies.filter((enemy) => enemy.hp > 0);
   if (def.exhaust || def.type === "power") combat.exhaustPile.push(card);
@@ -251,7 +263,7 @@ export function endTurn(run: RunState): RunState {
   tickStatuses(next.player.statuses);
   combat.enemies.forEach((enemy) => {
     tickStatuses(enemy.statuses);
-    const def = scaleEnemy(enemies.find((item) => item.id === enemy.definitionId)!, next.threat);
+    const def = scaleEnemy(getContentPack(next).enemies.find((item) => item.id === enemy.definitionId) ?? enemies.find((item) => item.id === enemy.definitionId)!, next.threat);
     enemy.moveIndex = (enemy.moveIndex + 1) % def.moves.length;
     enemy.intent = def.moves[enemy.moveIndex];
     enemy.block = 0;
@@ -259,6 +271,7 @@ export function endTurn(run: RunState): RunState {
   next.player.energy = next.player.maxEnergy;
   combat.turn += 1;
   drawCards(combat, 5, Math.random);
+  applyRelics(next, "turnStart");
   combat.log.unshift(`Turn ${combat.turn} begins.`);
   return next;
 }
@@ -285,6 +298,7 @@ function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove) {
 }
 
 function winCombat(run: RunState): RunState {
+  applyRelics(run, "combatWon");
   const node = run.map.find((item) => item.id === run.currentNodeId);
   if (node?.type === "boss") {
     run.screen = "gameover";
@@ -384,6 +398,7 @@ export function shopService(run: RunState, action: "heal" | "remove" | "leave"):
 
 function makeRewardCards(run: RunState, amount: number): CardInstance[] {
   const random = mulberry32(run.seed + run.movesTaken * 131 + run.threat);
+  const rewardCardPool = Object.values(getContentPack(run).cards).filter((card) => !["basic", "status", "curse"].includes(card.rarity));
   return Array.from({ length: amount }, () => makeCard(pick(rewardCardPool, random).id, random() > 0.88));
 }
 
@@ -407,9 +422,11 @@ function damageEnemy(enemy: EnemyState, amount: number) {
 function damagePlayer(run: RunState, amount: number) {
   const poison = getStatus(run.player.statuses, "poison");
   if (poison > 0) run.player.hp -= poison;
+  amount = Math.max(0, amount - relicAmount(run, "playerDamaged", "reduceDamage"));
   const blocked = Math.min(run.player.block, amount);
   run.player.block -= blocked;
   run.player.hp -= amount - blocked;
+  if (amount > 0) applyRelics(run, "playerDamaged");
 }
 
 function triggerPoison(enemy: EnemyState) {
@@ -455,4 +472,37 @@ function clone<T>(value: T): T {
 
 export function eventTitle(event?: GameEvent) {
   return event?.title ?? "Strange Silence";
+}
+
+function getContentPack(run: RunState): ContentPack {
+  return run.contentPack ?? loadContentPack();
+}
+
+function applyRelics(run: RunState, trigger: RelicTrigger) {
+  const pack = getContentPack(run);
+  run.relics.forEach((id) => {
+    const relic = pack.relics[id];
+    if (!relic || relic.trigger !== trigger) return;
+    relic.effects.forEach((effect) => applyRelicEffect(run, effect));
+    run.combat?.log.unshift(`${relic.name} triggered.`);
+  });
+}
+
+function applyRelicEffect(run: RunState, effect: RelicEffect) {
+  if (effect.type === "gainBlock") run.player.block += effect.amount;
+  else if (effect.type === "gainEnergy") run.player.energy += effect.amount;
+  else if (effect.type === "draw" && run.combat) drawCards(run.combat, effect.amount, Math.random);
+  else if (effect.type === "heal") run.player.hp = clamp(run.player.hp + effect.amount, 1, run.player.maxHp);
+  else if (effect.type === "gainGold") run.player.gold += effect.amount;
+  else if (effect.type === "gainStrength") addStatus(run.player.statuses, "strength", effect.amount);
+  else if (effect.type === "applyStatus" && effect.status) addStatus(run.player.statuses, effect.status, effect.amount);
+}
+
+function relicAmount(run: RunState, trigger: RelicTrigger, effectType: RelicEffect["type"]) {
+  const pack = getContentPack(run);
+  return run.relics.reduce((total, id) => {
+    const relic = pack.relics[id];
+    if (!relic || relic.trigger !== trigger) return total;
+    return total + relic.effects.filter((effect) => effect.type === effectType).reduce((sum, effect) => sum + effect.amount, 0);
+  }, 0);
 }

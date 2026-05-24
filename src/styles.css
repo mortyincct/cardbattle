@@ -112,6 +112,10 @@ h2 {
 }
 
 .iconButton,
+.toolButton,
+.iconTextButton,
+.dangerButton,
+.miniButton,
 .endTurn,
 .wideButton,
 .choice,
@@ -133,6 +137,41 @@ h2 {
 
 .iconButton svg {
   width: 18px;
+}
+
+.toolButton,
+.iconTextButton,
+.dangerButton,
+.miniButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid rgba(242, 238, 229, 0.16);
+  background: rgba(33, 35, 27, 0.95);
+  color: #f2eee5;
+  cursor: pointer;
+}
+
+.toolButton svg,
+.iconTextButton svg,
+.dangerButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+.dangerButton {
+  width: 100%;
+  margin-top: 10px;
+  border-color: rgba(232, 96, 78, 0.5);
+  color: #ffb0a3;
+}
+
+.miniButton {
+  min-height: 32px;
+  padding: 6px 10px;
 }
 
 .statusLine {
@@ -328,11 +367,223 @@ h2 {
 }
 
 .deckList span,
+.relicList span,
 .statuses {
   padding: 5px 8px;
   border: 1px solid rgba(242, 238, 229, 0.1);
   background: rgba(242, 238, 229, 0.05);
   color: #cbc5b7;
+}
+
+.relicList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.relicList span {
+  border-color: rgba(215, 183, 92, 0.28);
+  color: #e5cf82;
+}
+
+.editor {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.editorHeader,
+.editorStatus,
+.tabs,
+.editorActions,
+.listActions,
+.jsonTools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.editorHeader,
+.editorStatus {
+  justify-content: space-between;
+  padding: 12px 14px;
+  border: 1px solid rgba(242, 238, 229, 0.12);
+  background: rgba(16, 18, 14, 0.82);
+}
+
+.editorHeader h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.tabs {
+  flex-wrap: wrap;
+}
+
+.tabs button {
+  min-width: 100px;
+  padding: 9px 14px;
+  border: 1px solid rgba(242, 238, 229, 0.14);
+  background: rgba(33, 35, 27, 0.9);
+  color: #d5d0c2;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  border-color: rgba(224, 176, 92, 0.72);
+  color: #fff6de;
+}
+
+.editorStatus {
+  color: #d5d0c2;
+}
+
+.editorStatus .ok {
+  color: #a7df99;
+}
+
+.editorStatus .warn {
+  color: #ffb0a3;
+}
+
+.errorList {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(232, 96, 78, 0.34);
+  background: rgba(74, 30, 28, 0.42);
+  color: #ffd0c9;
+}
+
+.editorBody {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.editorList,
+.editorForm,
+.jsonTools {
+  padding: 14px;
+  border: 1px solid rgba(242, 238, 229, 0.12);
+  background: rgba(16, 18, 14, 0.86);
+}
+
+.editorList input,
+.field input,
+.field select,
+.field textarea,
+.jsonTools textarea {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid rgba(242, 238, 229, 0.14);
+  background: rgba(8, 10, 8, 0.88);
+  color: #f2eee5;
+  padding: 8px;
+}
+
+.listActions {
+  margin: 10px 0;
+}
+
+.itemList {
+  display: grid;
+  gap: 7px;
+  max-height: 650px;
+  overflow: auto;
+}
+
+.itemList button {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid rgba(242, 238, 229, 0.12);
+  background: rgba(242, 238, 229, 0.05);
+  color: #f2eee5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemList button.active {
+  border-color: rgba(224, 176, 92, 0.72);
+  background: rgba(224, 176, 92, 0.12);
+}
+
+.itemList span,
+.field,
+.checkField {
+  color: #bdb6a8;
+}
+
+.editorForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 12px;
+}
+
+.field,
+.checkField {
+  display: grid;
+  gap: 5px;
+  font-size: 0.9rem;
+}
+
+.field.wide,
+.nestedEditor,
+.dangerButton {
+  grid-column: 1 / -1;
+}
+
+.field textarea {
+  min-height: 86px;
+  resize: vertical;
+}
+
+.nestedEditor {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(242, 238, 229, 0.12);
+}
+
+.nestedEditor legend {
+  padding: 0 6px;
+  color: #e5cf82;
+}
+
+.nestedItem,
+.effectRow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 10px;
+  background: rgba(242, 238, 229, 0.04);
+}
+
+.effectRow {
+  grid-template-columns: minmax(150px, 1fr) 110px auto;
+}
+
+.jsonTools {
+  align-items: stretch;
+  grid-template-columns: 1fr 1fr auto auto;
+}
+
+.jsonTools label {
+  display: grid;
+  flex: 1;
+  gap: 6px;
+  color: #bdb6a8;
+}
+
+.jsonTools textarea {
+  min-height: 160px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
 }
 
 .combat {
@@ -396,6 +647,18 @@ h2 {
   }
 
   .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .editorBody,
+  .editorForm {
+    grid-template-columns: 1fr;
+  }
+
+  .jsonTools,
+  .nestedItem,
+  .effectRow {
+    display: grid;
     grid-template-columns: 1fr;
   }
 

@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { chooseRewardCard, endTurn, moveToNode, newRun, playCard, scaleEnemy } from "./state";
-import { enemies } from "./content";
+import { beforeEach, describe, expect, it } from "vitest";
+import { chooseRewardCard, endTurn, moveToNode, newRun, playCard, scaleEnemy, startCombat } from "./state";
+import { CONTENT_DRAFT_KEY, defaultContentPack, enemies, saveContentDraft, validateContentPack } from "./content";
+
+beforeEach(() => {
+  localStorage.removeItem(CONTENT_DRAFT_KEY);
+});
 
 describe("map movement", () => {
   it("only allows movement to visible neighboring nodes and raises threat", () => {
@@ -52,9 +56,72 @@ describe("rewards", () => {
   it("adds a chosen reward card to the deck", () => {
     let run = newRun(5);
     run.screen = "reward";
-    run.pendingReward = { type: "card", amount: 10, cards: [{ uid: "reward-1", cardId: "quickCut", upgraded: false }] };
+    run.pendingReward = { type: "card", amount: 10, cards: [{ uid: "reward-1", cardId: "quick_cut", upgraded: false }] };
     const next = chooseRewardCard(run, "reward-1");
     expect(next.deck.some((card) => card.uid === "reward-1")).toBe(true);
     expect(next.screen).toBe("map");
+  });
+});
+
+describe("content packs", () => {
+  it("accepts the default content pack", () => {
+    expect(validateContentPack(defaultContentPack).valid).toBe(true);
+  });
+
+  it("rejects invalid ids, invalid effects, empty moves, and bad numbers", () => {
+    const invalid = {
+      cards: {
+        "Bad Id": { ...defaultContentPack.cards.strike, id: "Bad Id", cost: -1, effects: [{ type: "missing", amount: 1 }] }
+      },
+      enemies: [{ ...defaultContentPack.enemies[0], maxHp: 0, moves: [] }],
+      relics: {
+        bad: { ...defaultContentPack.relics.cracked_core, id: "bad", effects: [{ type: "applyStatus", amount: 1 }] }
+      }
+    };
+    const result = validateContentPack(invalid as typeof defaultContentPack);
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(3);
+  });
+
+  it("uses a saved valid draft for new runs", () => {
+    localStorage.removeItem(CONTENT_DRAFT_KEY);
+    const draft = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    draft.cards.strike.name = "Draft Strike";
+    saveContentDraft(draft);
+    const run = newRun(99);
+    expect(run.contentPack?.cards.strike.name).toBe("Draft Strike");
+    localStorage.removeItem(CONTENT_DRAFT_KEY);
+  });
+});
+
+describe("relics", () => {
+  it("applies combat start relic effects", () => {
+    const run = newRun(21);
+    run.relics = ["pocket_lantern", "cracked_core"];
+    run.combat = startCombat(run, "combat");
+    expect(run.player.energy).toBeGreaterThanOrEqual(4);
+    expect(run.player.statuses.some((status) => status.id === "strength" && status.amount >= 1)).toBe(true);
+  });
+
+  it("applies combat won relic effects", () => {
+    let run = newRun(22);
+    run.relics = ["red_ledger", "marrow_cup"];
+    run.screen = "combat";
+    run.currentNodeId = run.map.find((node) => node.type !== "boss")?.id ?? "start";
+    run.combat = {
+      enemies: [{ instanceId: "enemy-1", definitionId: "hollow", name: "Test", maxHp: 1, hp: 1, block: 0, statuses: [], moveIndex: 0, intent: { id: "wait", intent: "defend", label: "Wait" } }],
+      drawPile: [],
+      hand: [{ uid: "card-1", cardId: "strike", upgraded: false }],
+      discardPile: [],
+      exhaustPile: [],
+      turn: 1,
+      log: []
+    };
+    run.player.hp = 50;
+    const gold = run.player.gold;
+    run = playCard(run, "card-1", "enemy-1");
+    expect(run.screen).toBe("reward");
+    expect(run.player.gold).toBeGreaterThan(gold + 7);
+    expect(run.player.hp).toBe(53);
   });
 });

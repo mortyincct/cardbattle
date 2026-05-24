@@ -2,10 +2,17 @@ export type CardType = "attack" | "skill" | "power" | "status" | "curse";
 export type Rarity = "basic" | "common" | "uncommon" | "rare";
 export type NodeType = "start" | "combat" | "elite" | "event" | "campfire" | "shop" | "treasure" | "boss";
 export type Screen = "menu" | "map" | "combat" | "reward" | "event" | "shop" | "campfire" | "treasure" | "gameover";
+export type RelicTrigger = "runStart" | "combatStart" | "turnStart" | "cardPlayed" | "playerDamaged" | "combatWon";
 
 export interface Effect {
   type: "damage" | "block" | "draw" | "gainEnergy" | "applyWeak" | "applyVulnerable" | "applyPoison" | "heal" | "strength" | "thorns";
   amount: number;
+}
+
+export interface RelicEffect {
+  type: "gainBlock" | "gainEnergy" | "draw" | "heal" | "gainGold" | "gainStrength" | "reduceDamage" | "applyStatus";
+  amount: number;
+  status?: StatusEffect["id"];
 }
 
 export interface CardDefinition {
@@ -50,6 +57,21 @@ export interface EnemyDefinition {
   maxHp: number;
   armor: number;
   moves: EnemyMove[];
+}
+
+export interface RelicDefinition {
+  id: string;
+  name: string;
+  rarity: Rarity;
+  description: string;
+  trigger: RelicTrigger;
+  effects: RelicEffect[];
+}
+
+export interface ContentPack {
+  cards: Record<string, CardDefinition>;
+  enemies: EnemyDefinition[];
+  relics: Record<string, RelicDefinition>;
 }
 
 export interface EnemyState {
@@ -118,7 +140,9 @@ export interface RunState {
   saveVersion: number;
   seed: number;
   screen: Screen;
+  contentPack?: ContentPack;
   player: PlayerState;
+  relics: string[];
   deck: CardInstance[];
   map: MapNode[];
   currentNodeId: string;

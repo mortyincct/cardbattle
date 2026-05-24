@@ -1,11 +1,13 @@
-import { Activity, Coins, Flame, Heart, Map, RotateCcw, Save, Shield, Skull, Swords, Zap } from "lucide-react";
+import { Activity, Coins, Database, Heart, Map, Play, RotateCcw, Shield, Swords, Zap } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { cards } from "../game/content";
-import { applyEventChoice, buyFromShop, cardDef, chooseRewardCard, claimTreasure, clearSave, endTurn, loadRun, moveToNode, newRun, playCard, restAtCampfire, saveRun, shopService } from "../game/state";
-import type { CardInstance, EnemyState, MapNode, RunState } from "../game/types";
+import { cards, loadContentPack } from "../game/content";
+import { applyEventChoice, buyFromShop, cardDefFrom, chooseRewardCard, claimTreasure, clearSave, endTurn, loadRun, moveToNode, newRun, playCard, restAtCampfire, saveRun, shopService } from "../game/state";
+import type { CardInstance, ContentPack, EnemyState, MapNode, RunState } from "../game/types";
+import { ContentEditor } from "./ContentEditor";
 
 export function App() {
   const [run, setRun] = useState<RunState>(() => loadRun() ?? newRun());
+  const [mode, setMode] = useState<"game" | "editor">("game");
   const [selectedEnemy, setSelectedEnemy] = useState<string | undefined>();
 
   useEffect(() => {
@@ -21,6 +23,8 @@ export function App() {
     setSelectedEnemy(undefined);
   };
 
+  const pack = run.contentPack ?? loadContentPack();
+
   return (
     <main className="shell">
       <header className="topbar">
@@ -34,11 +38,17 @@ export function App() {
           <Meter icon={<Activity />} label="Threat" value={run.threat} tone="threat" />
           <Meter icon={<Map />} label="Steps" value={run.movesTaken} />
         </div>
+        <button className="toolButton" onClick={() => setMode(mode === "game" ? "editor" : "game")}>
+          {mode === "game" ? <Database /> : <Play />}
+          {mode === "game" ? "Dev Editor" : "Back to game"}
+        </button>
         <button className="iconButton" title="New run" onClick={reset}>
           <RotateCcw />
         </button>
       </header>
 
+      {mode === "editor" ? <ContentEditor initialPack={loadContentPack()} onNewRun={reset} /> : (
+      <>
       <section className="statusLine">
         <span>{run.message}</span>
         <span>Current: {labelNode(currentNode)}</span>
@@ -46,12 +56,14 @@ export function App() {
       </section>
 
       {run.screen === "combat" && run.combat ? (
-        <CombatView run={run} selectedEnemy={selectedTarget} onSelectEnemy={setSelectedEnemy} onPlay={(card) => setRun(playCard(run, card.uid, selectedTarget?.instanceId))} onEndTurn={() => setRun(endTurn(run))} />
+        <CombatView run={run} pack={pack} selectedEnemy={selectedTarget} onSelectEnemy={setSelectedEnemy} onPlay={(card) => setRun(playCard(run, card.uid, selectedTarget?.instanceId))} onEndTurn={() => setRun(endTurn(run))} />
       ) : (
         <div className="layout">
           <MapView run={run} onMove={(nodeId) => setRun(moveToNode(run, nodeId))} />
-          <SidePanel run={run} setRun={setRun} reset={reset} />
+          <SidePanel run={run} pack={pack} setRun={setRun} reset={reset} />
         </div>
+      )}
+      </>
       )}
     </main>
   );
@@ -101,12 +113,12 @@ function MapView({ run, onMove }: { run: RunState; onMove: (nodeId: string) => v
   );
 }
 
-function SidePanel({ run, setRun, reset }: { run: RunState; setRun: (run: RunState) => void; reset: () => void }) {
+function SidePanel({ run, pack, setRun, reset }: { run: RunState; pack: ContentPack; setRun: (run: RunState) => void; reset: () => void }) {
   if (run.screen === "reward" && run.pendingReward?.cards) {
     return (
       <Panel title="Card Reward">
         <p>Victory gold gained: {run.pendingReward.amount}</p>
-        <div className="cardGrid">{run.pendingReward.cards.map((card) => <CardButton key={card.uid} card={card} onClick={() => setRun(chooseRewardCard(run, card.uid))} />)}</div>
+        <div className="cardGrid">{run.pendingReward.cards.map((card) => <CardButton key={card.uid} pack={pack} card={card} onClick={() => setRun(chooseRewardCard(run, card.uid))} />)}</div>
         <button className="wideButton" onClick={() => setRun(chooseRewardCard(run))}>Skip card</button>
       </Panel>
     );
@@ -127,7 +139,7 @@ function SidePanel({ run, setRun, reset }: { run: RunState; setRun: (run: RunSta
   if (run.screen === "shop") {
     return (
       <Panel title="Lantern Shop">
-        <div className="cardGrid">{run.shopOffer?.map((card) => <CardButton key={card.uid} card={card} price={55} disabled={run.player.gold < 55} onClick={() => setRun(buyFromShop(run, card.uid))} />)}</div>
+        <div className="cardGrid">{run.shopOffer?.map((card) => <CardButton key={card.uid} pack={pack} card={card} price={55} disabled={run.player.gold < 55} onClick={() => setRun(buyFromShop(run, card.uid))} />)}</div>
         <button className="wideButton" disabled={run.player.gold < 35} onClick={() => setRun(shopService(run, "heal"))}>Heal 18 HP - 35g</button>
         <button className="wideButton" disabled={run.player.gold < 75 || run.deck.length <= 6} onClick={() => setRun(shopService(run, "remove"))}>Remove a basic card - 75g</button>
         <button className="wideButton" onClick={() => setRun(shopService(run, "leave"))}>Leave shop</button>
@@ -160,12 +172,13 @@ function SidePanel({ run, setRun, reset }: { run: RunState; setRun: (run: RunSta
   }
   return (
     <Panel title="Run">
-      <DeckList deck={run.deck} />
+      <RelicList run={run} pack={pack} />
+      <DeckList deck={run.deck} pack={pack} />
     </Panel>
   );
 }
 
-function CombatView({ run, selectedEnemy, onSelectEnemy, onPlay, onEndTurn }: { run: RunState; selectedEnemy?: EnemyState; onSelectEnemy: (id: string) => void; onPlay: (card: CardInstance) => void; onEndTurn: () => void }) {
+function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn }: { run: RunState; pack: ContentPack; selectedEnemy?: EnemyState; onSelectEnemy: (id: string) => void; onPlay: (card: CardInstance) => void; onEndTurn: () => void }) {
   const combat = run.combat!;
   return (
     <section className="combat">
@@ -189,9 +202,9 @@ function CombatView({ run, selectedEnemy, onSelectEnemy, onPlay, onEndTurn }: { 
       </div>
       <div className="hand">
         {combat.hand.map((card) => {
-          const def = cardDef(card);
+          const def = cardDefFrom(card, pack);
           const disabled = def.cost > run.player.energy || def.type === "status" || def.type === "curse";
-          return <CardButton key={card.uid} card={card} disabled={disabled} onClick={() => onPlay(card)} />;
+          return <CardButton key={card.uid} pack={pack} card={card} disabled={disabled} onClick={() => onPlay(card)} />;
         })}
       </div>
       <div className="combatFooter">
@@ -204,8 +217,8 @@ function CombatView({ run, selectedEnemy, onSelectEnemy, onPlay, onEndTurn }: { 
   );
 }
 
-function CardButton({ card, onClick, disabled, price }: { card: CardInstance; onClick: () => void; disabled?: boolean; price?: number }) {
-  const def = cardDef(card);
+function CardButton({ card, pack, onClick, disabled, price }: { card: CardInstance; pack: ContentPack; onClick: () => void; disabled?: boolean; price?: number }) {
+  const def = cardDefFrom(card, pack);
   return (
     <button className={`card ${def.type}`} onClick={onClick} disabled={disabled}>
       <span className="cost">{def.cost}</span>
@@ -217,15 +230,27 @@ function CardButton({ card, onClick, disabled, price }: { card: CardInstance; on
   );
 }
 
-function DeckList({ deck }: { deck: CardInstance[] }) {
+function DeckList({ deck, pack }: { deck: CardInstance[]; pack: ContentPack }) {
   const grouped = deck.reduce<Record<string, number>>((acc, card) => {
-    const key = `${cards[card.cardId].name}${card.upgraded ? "+" : ""}`;
+    const key = `${(pack.cards[card.cardId] ?? cards[card.cardId]).name}${card.upgraded ? "+" : ""}`;
     acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
   return (
     <div className="deckList">
       {Object.entries(grouped).map(([name, count]) => <span key={name}>{count}x {name}</span>)}
+    </div>
+  );
+}
+
+function RelicList({ run, pack }: { run: RunState; pack: ContentPack }) {
+  if (!run.relics.length) return null;
+  return (
+    <div className="relicList">
+      {run.relics.map((id) => {
+        const relic = pack.relics[id];
+        return relic ? <span key={id} title={relic.description}>{relic.name}</span> : null;
+      })}
     </div>
   );
 }
