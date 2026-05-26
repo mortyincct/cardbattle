@@ -1,6 +1,7 @@
-import { cards, enemies, events, loadContentPack } from "./content";
+import { cards, defaultContentPack, enemies, events, loadContentPack, validateContentPack } from "./content";
+import { normalizeEffects, upgradeContentPack } from "./effects";
 import { mulberry32, pick, shuffle, uid } from "./rng";
-import type { CardDefinition, CardInstance, CombatState, ContentPack, Effect, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicEffect, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
+import type { CardDefinition, CardInstance, CombatState, ContentPack, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEffect, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
 export const SAVE_VERSION = 1;
@@ -50,8 +51,18 @@ export function saveRun(run: RunState) {
 export function loadRun(): RunState | undefined {
   const raw = localStorage.getItem(SAVE_KEY);
   if (!raw) return undefined;
-  const parsed = JSON.parse(raw) as RunState;
-  return parsed.saveVersion === SAVE_VERSION ? parsed : undefined;
+  try {
+    const parsed = JSON.parse(raw) as RunState;
+    if (parsed.contentPack) {
+      const upgraded = upgradeContentPack(parsed.contentPack);
+      parsed.contentPack = validateContentPack(upgraded).valid ? upgraded : defaultContentPack;
+    }
+    if (isRunState(parsed)) return parsed;
+  } catch {
+    // Invalid local saves should never prevent the app from rendering.
+  }
+  clearSave();
+  return undefined;
 }
 
 export function clearSave() {
@@ -188,7 +199,8 @@ export function scaleEnemy(enemy: EnemyDefinition, threat: number): EnemyDefinit
     moves: enemy.moves.map((move) => ({
       ...move,
       damage: move.damage ? Math.max(1, Math.round(move.damage * damageScale)) : undefined,
-      block: move.block ? move.block + Math.floor(threat / 3) : undefined
+      block: move.block ? move.block + Math.floor(threat / 3) : undefined,
+      effects: move.effects?.map((effect) => (effect.type === "damage" ? { ...effect, amount: Math.max(1, Math.round(effect.amount * damageScale)) } : effect))
     }))
   };
 }
@@ -211,7 +223,7 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
   next.player.energy -= def.cost;
   combat.hand.splice(index, 1);
   const effects = card.upgraded ? def.upgradedEffects : def.effects;
-  effects.forEach((effect) => applyEffect(next, effect, target));
+  resolveEffects(next, effects, { source: "card", selectedEnemy: target });
   applyRelics(next, "cardPlayed");
   if (def.id === "harvest" && target && target.hp <= 0) next.player.gold += card.upgraded ? 12 : 8;
   combat.enemies = combat.enemies.filter((enemy) => enemy.hp > 0);
@@ -220,25 +232,6 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
   combat.log.unshift(`Played ${def.name}.`);
   if (combat.enemies.length === 0) return winCombat(next);
   return next;
-}
-
-function applyEffect(run: RunState, effect: Effect, target?: EnemyState) {
-  const combat = run.combat!;
-  const strength = getStatus(run.player.statuses, "strength");
-  if (effect.type === "damage" && target) {
-    let amount = effect.amount + strength;
-    if (getStatus(run.player.statuses, "weak") > 0) amount = Math.floor(amount * 0.75);
-    if (getStatus(target.statuses, "vulnerable") > 0) amount = Math.floor(amount * 1.5);
-    damageEnemy(target, amount);
-  } else if (effect.type === "block") run.player.block += effect.amount;
-  else if (effect.type === "draw") drawCards(combat, effect.amount, Math.random);
-  else if (effect.type === "gainEnergy") run.player.energy += effect.amount;
-  else if (effect.type === "heal") run.player.hp = clamp(run.player.hp + effect.amount, 1, run.player.maxHp);
-  else if (effect.type === "applyWeak" && target) addStatus(target.statuses, "weak", effect.amount);
-  else if (effect.type === "applyVulnerable" && target) addStatus(target.statuses, "vulnerable", effect.amount);
-  else if (effect.type === "applyPoison" && target) addStatus(target.statuses, "poison", effect.amount);
-  else if (effect.type === "strength") addStatus(run.player.statuses, "strength", effect.amount);
-  else if (effect.type === "thorns") addStatus(run.player.statuses, "thorns", effect.amount);
 }
 
 export function endTurn(run: RunState): RunState {
@@ -288,13 +281,70 @@ function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove) {
     const thorns = getStatus(run.player.statuses, "thorns");
     if (thorns > 0) damageEnemy(enemy, thorns);
   }
-  move.effects?.forEach((effect) => {
-    if (effect.type === "applyWeak") addStatus(run.player.statuses, "weak", effect.amount);
-    if (effect.type === "applyVulnerable") addStatus(run.player.statuses, "vulnerable", effect.amount);
-    if (effect.type === "applyPoison") addStatus(run.player.statuses, "poison", effect.amount);
-    if (effect.type === "strength") addStatus(enemy.statuses, "strength", effect.amount);
-  });
+  resolveEffects(run, move.effects ?? [], { source: "enemy", sourceEnemy: enemy });
   run.combat!.log.unshift(`${enemy.name}: ${move.label}.`);
+}
+
+export function resolveEffects(run: RunState, effects: GameEffect[], context: { source: "card" | "enemy" | "relic"; selectedEnemy?: EnemyState; sourceEnemy?: EnemyState; random?: () => number }) {
+  const normalized = normalizeEffects(effects, context.source);
+  normalized.forEach((effect) => {
+    if (effect.type === "damage") {
+      resolveTargets(run, effect.target, context).forEach((target) => {
+        for (let i = 0; i < (effect.hits ?? 1); i += 1) {
+          if (target === "player") damagePlayerFromEffect(run, effect.amount, context.sourceEnemy);
+          else damageEnemyFromEffect(run, target, effect.amount, context.sourceEnemy);
+        }
+      });
+    } else if (effect.type === "block") {
+      resolveTargets(run, effect.target, context).forEach((target) => {
+        if (target === "player") run.player.block += effect.amount;
+        else target.block += effect.amount;
+      });
+    } else if (effect.type === "draw" && run.combat) drawCards(run.combat, effect.amount, context.random ?? Math.random);
+    else if (effect.type === "gainEnergy") run.player.energy += effect.amount;
+    else if (effect.type === "heal") run.player.hp = clamp(run.player.hp + effect.amount, 1, run.player.maxHp);
+    else if (effect.type === "gainGold") run.player.gold += effect.amount;
+    else if ((effect.type === "applyStatus" || effect.type === "gainStatus") && effect.status) {
+      resolveTargets(run, effect.target, context).forEach((target) => {
+        if (target === "player") addStatus(run.player.statuses, effect.status!, effect.amount);
+        else addStatus(target.statuses, effect.status!, effect.amount);
+      });
+    }
+  });
+}
+
+function resolveTargets(run: RunState, target: EffectTarget | undefined, context: { source: "card" | "enemy" | "relic"; selectedEnemy?: EnemyState; sourceEnemy?: EnemyState; random?: () => number }): Array<EnemyState | "player"> {
+  const combat = run.combat;
+  const aliveEnemies = combat?.enemies.filter((enemy) => enemy.hp > 0) ?? [];
+  const defaultTarget: EffectTarget = context.source === "enemy" ? "player" : context.source === "relic" ? "player" : "selectedEnemy";
+  const resolved = target ?? defaultTarget;
+  if (resolved === "player" || (resolved === "self" && context.source !== "enemy")) return ["player"];
+  if ((resolved === "source" || resolved === "self") && context.sourceEnemy) return [context.sourceEnemy];
+  if (resolved === "allEnemies") return aliveEnemies;
+  if (resolved === "randomEnemy") return [aliveEnemies[Math.floor((context.random?.() ?? 0) * aliveEnemies.length)] ?? aliveEnemies[0]].filter(Boolean) as EnemyState[];
+  return [context.selectedEnemy ?? aliveEnemies[0]].filter(Boolean) as EnemyState[];
+}
+
+function damageEnemyFromEffect(run: RunState, enemy: EnemyState, baseAmount: number, sourceEnemy?: EnemyState) {
+  let amount = baseAmount;
+  if (sourceEnemy) {
+    amount += getStatus(sourceEnemy.statuses, "strength");
+    if (getStatus(sourceEnemy.statuses, "weak") > 0) amount = Math.floor(amount * 0.75);
+  } else {
+    amount += getStatus(run.player.statuses, "strength");
+    if (getStatus(run.player.statuses, "weak") > 0) amount = Math.floor(amount * 0.75);
+  }
+  if (getStatus(enemy.statuses, "vulnerable") > 0) amount = Math.floor(amount * 1.5);
+  damageEnemy(enemy, amount);
+}
+
+function damagePlayerFromEffect(run: RunState, baseAmount: number, sourceEnemy?: EnemyState) {
+  let amount = baseAmount + (sourceEnemy ? getStatus(sourceEnemy.statuses, "strength") : 0);
+  if (sourceEnemy && getStatus(sourceEnemy.statuses, "weak") > 0) amount = Math.floor(amount * 0.75);
+  if (getStatus(run.player.statuses, "vulnerable") > 0) amount = Math.floor(amount * 1.5);
+  damagePlayer(run, amount);
+  const thorns = getStatus(run.player.statuses, "thorns");
+  if (sourceEnemy && thorns > 0) damageEnemy(sourceEnemy, thorns);
 }
 
 function winCombat(run: RunState): RunState {
@@ -470,6 +520,59 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
 
+function isRunState(value: RunState | undefined): value is RunState {
+  return Boolean(
+    value &&
+    value.saveVersion === SAVE_VERSION &&
+    typeof value.seed === "number" &&
+    typeof value.screen === "string" &&
+    isPlayerState(value.player) &&
+    Array.isArray(value.relics) &&
+    value.relics.every((id) => typeof id === "string") &&
+    Array.isArray(value.deck) &&
+    value.deck.every(isCardInstance) &&
+    Array.isArray(value.map) &&
+    value.map.every(isMapNode) &&
+    typeof value.currentNodeId === "string" &&
+    typeof value.threat === "number" &&
+    typeof value.movesTaken === "number" &&
+    typeof value.message === "string" &&
+    typeof value.victory === "boolean" &&
+    (!value.contentPack || validateContentPack(value.contentPack).valid)
+  );
+}
+
+function isPlayerState(value: RunState["player"] | undefined) {
+  return Boolean(
+    value &&
+    typeof value.maxHp === "number" &&
+    typeof value.hp === "number" &&
+    typeof value.block === "number" &&
+    typeof value.energy === "number" &&
+    typeof value.maxEnergy === "number" &&
+    typeof value.gold === "number" &&
+    Array.isArray(value.statuses)
+  );
+}
+
+function isCardInstance(value: CardInstance | undefined) {
+  return Boolean(value && typeof value.uid === "string" && typeof value.cardId === "string" && typeof value.upgraded === "boolean");
+}
+
+function isMapNode(value: MapNode | undefined) {
+  return Boolean(
+    value &&
+    typeof value.id === "string" &&
+    typeof value.type === "string" &&
+    typeof value.x === "number" &&
+    typeof value.y === "number" &&
+    Array.isArray(value.neighbors) &&
+    value.neighbors.every((id) => typeof id === "string") &&
+    typeof value.completed === "boolean" &&
+    typeof value.visible === "boolean"
+  );
+}
+
 export function eventTitle(event?: GameEvent) {
   return event?.title ?? "Strange Silence";
 }
@@ -483,22 +586,12 @@ function applyRelics(run: RunState, trigger: RelicTrigger) {
   run.relics.forEach((id) => {
     const relic = pack.relics[id];
     if (!relic || relic.trigger !== trigger) return;
-    relic.effects.forEach((effect) => applyRelicEffect(run, effect));
+    resolveEffects(run, relic.effects, { source: "relic" });
     run.combat?.log.unshift(`${relic.name} triggered.`);
   });
 }
 
-function applyRelicEffect(run: RunState, effect: RelicEffect) {
-  if (effect.type === "gainBlock") run.player.block += effect.amount;
-  else if (effect.type === "gainEnergy") run.player.energy += effect.amount;
-  else if (effect.type === "draw" && run.combat) drawCards(run.combat, effect.amount, Math.random);
-  else if (effect.type === "heal") run.player.hp = clamp(run.player.hp + effect.amount, 1, run.player.maxHp);
-  else if (effect.type === "gainGold") run.player.gold += effect.amount;
-  else if (effect.type === "gainStrength") addStatus(run.player.statuses, "strength", effect.amount);
-  else if (effect.type === "applyStatus" && effect.status) addStatus(run.player.statuses, effect.status, effect.amount);
-}
-
-function relicAmount(run: RunState, trigger: RelicTrigger, effectType: RelicEffect["type"]) {
+function relicAmount(run: RunState, trigger: RelicTrigger, effectType: GameEffect["type"]) {
   const pack = getContentPack(run);
   return run.relics.reduce((total, id) => {
     const relic = pack.relics[id];

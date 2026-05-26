@@ -3,17 +3,20 @@ export type Rarity = "basic" | "common" | "uncommon" | "rare";
 export type NodeType = "start" | "combat" | "elite" | "event" | "campfire" | "shop" | "treasure" | "boss";
 export type Screen = "menu" | "map" | "combat" | "reward" | "event" | "shop" | "campfire" | "treasure" | "gameover";
 export type RelicTrigger = "runStart" | "combatStart" | "turnStart" | "cardPlayed" | "playerDamaged" | "combatWon";
+export type StatusId = "weak" | "vulnerable" | "poison" | "strength" | "thorns";
+export type EffectTarget = "self" | "player" | "selectedEnemy" | "allEnemies" | "randomEnemy" | "source";
+export type EffectType = "damage" | "block" | "draw" | "gainEnergy" | "heal" | "gainGold" | "applyStatus" | "gainStatus" | "reduceDamage";
 
-export interface Effect {
-  type: "damage" | "block" | "draw" | "gainEnergy" | "applyWeak" | "applyVulnerable" | "applyPoison" | "heal" | "strength" | "thorns";
+export interface GameEffect {
+  type: EffectType;
   amount: number;
+  target?: EffectTarget;
+  status?: StatusId;
+  hits?: number;
 }
 
-export interface RelicEffect {
-  type: "gainBlock" | "gainEnergy" | "draw" | "heal" | "gainGold" | "gainStrength" | "reduceDamage" | "applyStatus";
-  amount: number;
-  status?: StatusEffect["id"];
-}
+export type Effect = GameEffect;
+export type RelicEffect = GameEffect;
 
 export interface CardDefinition {
   id: string;
@@ -36,7 +39,7 @@ export interface CardInstance {
 }
 
 export interface StatusEffect {
-  id: "weak" | "vulnerable" | "poison" | "strength" | "thorns";
+  id: StatusId;
   amount: number;
 }
 

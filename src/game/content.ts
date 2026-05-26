@@ -1,6 +1,7 @@
+import { upgradeContentPack, validateGameEffect } from "./effects";
 import type { CardDefinition, ContentPack, EnemyDefinition, GameEvent, RelicDefinition } from "./types";
 
-export const cards: Record<string, CardDefinition> = {
+const baseCards: Record<string, Omit<CardDefinition, "effects" | "upgradedEffects"> & { effects: unknown[]; upgradedEffects: unknown[] }> = {
   strike: { id: "strike", name: "Strike", type: "attack", rarity: "basic", cost: 1, description: "Deal 6 damage.", upgradedDescription: "Deal 9 damage.", effects: [{ type: "damage", amount: 6 }], upgradedEffects: [{ type: "damage", amount: 9 }] },
   guard: { id: "guard", name: "Guard", type: "skill", rarity: "basic", cost: 1, description: "Gain 5 block.", upgradedDescription: "Gain 8 block.", effects: [{ type: "block", amount: 5 }], upgradedEffects: [{ type: "block", amount: 8 }] },
   quick_cut: { id: "quick_cut", name: "Quick Cut", type: "attack", rarity: "common", cost: 0, description: "Deal 3 damage. Draw 1.", upgradedDescription: "Deal 5 damage. Draw 1.", effects: [{ type: "damage", amount: 3 }, { type: "draw", amount: 1 }], upgradedEffects: [{ type: "damage", amount: 5 }, { type: "draw", amount: 1 }] },
@@ -23,9 +24,7 @@ export const cards: Record<string, CardDefinition> = {
   curse: { id: "curse", name: "Night Mark", type: "curse", rarity: "basic", cost: 1, description: "A dead card born from risky bargains.", upgradedDescription: "A dead card born from risky bargains.", effects: [], upgradedEffects: [] }
 };
 
-export const rewardCardPool = Object.values(cards).filter((card) => !["basic", "status", "curse"].includes(card.rarity));
-
-export const enemies: EnemyDefinition[] = [
+const baseEnemies: Array<Omit<EnemyDefinition, "moves"> & { moves: Array<Omit<EnemyDefinition["moves"][number], "effects"> & { effects?: unknown[] }> }> = [
   { id: "hollow", name: "Hollow Acolyte", tier: "normal", maxHp: 34, armor: 0, moves: [{ id: "chant", intent: "debuff", label: "Weak hex", effects: [{ type: "applyWeak", amount: 1 }] }, { id: "knife", intent: "attack", label: "Knife", damage: 7 }] },
   { id: "mawling", name: "Mawling", tier: "normal", maxHp: 42, armor: 0, moves: [{ id: "gnash", intent: "attack", label: "Gnash", damage: 6, hits: 2 }, { id: "hide", intent: "defend", label: "Hide", block: 9 }] },
   { id: "cinder", name: "Cinder Husk", tier: "normal", maxHp: 38, armor: 2, moves: [{ id: "burn", intent: "mixed", label: "Burning shove", damage: 8, effects: [{ type: "applyVulnerable", amount: 1 }] }, { id: "flare", intent: "attack", label: "Flare", damage: 11 }] },
@@ -44,7 +43,7 @@ export const events: GameEvent[] = [
   { id: "caravan", title: "Lost Caravan", body: "The wagons are abandoned, but the locks have fresh scratches.", choices: [{ id: "loot", label: "Loot fast", description: "Gain 45 gold. Lose 8 HP.", effect: "gainGoldLoseHp" }, { id: "repair", label: "Repair your gear", description: "Upgrade a random card.", effect: "upgradeRandom" }, { id: "leave", label: "Leave", description: "Move on.", effect: "skip" }] }
 ];
 
-export const relics: Record<string, RelicDefinition> = {
+const baseRelics: Record<string, Omit<RelicDefinition, "effects"> & { effects: unknown[] }> = {
   cracked_core: { id: "cracked_core", name: "Cracked Core", rarity: "basic", description: "At the start of combat, gain 1 Strength.", trigger: "combatStart", effects: [{ type: "gainStrength", amount: 1 }] },
   pocket_lantern: { id: "pocket_lantern", name: "Pocket Lantern", rarity: "common", description: "At the start of combat, gain 1 energy.", trigger: "combatStart", effects: [{ type: "gainEnergy", amount: 1 }] },
   ash_charm: { id: "ash_charm", name: "Ash Charm", rarity: "common", description: "At the start of each turn, gain 2 block.", trigger: "turnStart", effects: [{ type: "gainBlock", amount: 2 }] },
@@ -57,7 +56,11 @@ export const relics: Record<string, RelicDefinition> = {
   war_mask: { id: "war_mask", name: "War Mask", rarity: "rare", description: "At the start of combat, gain 2 Strength.", trigger: "combatStart", effects: [{ type: "gainStrength", amount: 2 }] }
 };
 
-export const defaultContentPack: ContentPack = { cards, enemies, relics };
+export const defaultContentPack: ContentPack = upgradeContentPack({ cards: baseCards as Record<string, CardDefinition>, enemies: baseEnemies as EnemyDefinition[], relics: baseRelics as Record<string, RelicDefinition> });
+export const cards: Record<string, CardDefinition> = defaultContentPack.cards;
+export const enemies: EnemyDefinition[] = defaultContentPack.enemies;
+export const relics: Record<string, RelicDefinition> = defaultContentPack.relics;
+export const rewardCardPool = Object.values(cards).filter((card) => !["basic", "status", "curse"].includes(card.rarity));
 
 export const CONTENT_DRAFT_KEY = "netspire-content-draft";
 
@@ -66,7 +69,7 @@ export function loadContentPack(): ContentPack {
   const raw = localStorage.getItem(CONTENT_DRAFT_KEY);
   if (!raw) return defaultContentPack;
   try {
-    const parsed = JSON.parse(raw) as ContentPack;
+    const parsed = upgradeContentPack(JSON.parse(raw) as ContentPack);
     return validateContentPack(parsed).valid ? parsed : defaultContentPack;
   } catch {
     return defaultContentPack;
@@ -74,7 +77,7 @@ export function loadContentPack(): ContentPack {
 }
 
 export function saveContentDraft(pack: ContentPack) {
-  localStorage.setItem(CONTENT_DRAFT_KEY, JSON.stringify(pack));
+  localStorage.setItem(CONTENT_DRAFT_KEY, JSON.stringify(upgradeContentPack(pack)));
 }
 
 export function clearContentDraft() {
@@ -84,12 +87,9 @@ export function clearContentDraft() {
 const idPattern = /^[a-z0-9_-]+$/;
 const cardTypes = ["attack", "skill", "power", "status", "curse"];
 const rarities = ["basic", "common", "uncommon", "rare"];
-const effectTypes = ["damage", "block", "draw", "gainEnergy", "applyWeak", "applyVulnerable", "applyPoison", "heal", "strength", "thorns"];
 const intents = ["attack", "defend", "buff", "debuff", "mixed"];
 const tiers = ["normal", "elite", "boss"];
 const relicTriggers = ["runStart", "combatStart", "turnStart", "cardPlayed", "playerDamaged", "combatWon"];
-const relicEffects = ["gainBlock", "gainEnergy", "draw", "heal", "gainGold", "gainStrength", "reduceDamage", "applyStatus"];
-const statuses = ["weak", "vulnerable", "poison", "strength", "thorns"];
 
 export function validateContentPack(pack: ContentPack): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -137,11 +137,7 @@ export function validateContentPack(pack: ContentPack): { valid: boolean; errors
     if (!rarities.includes(relic.rarity)) errors.push(`Relic ${key} has invalid rarity.`);
     if (!relicTriggers.includes(relic.trigger)) errors.push(`Relic ${key} has invalid trigger.`);
     if (!Array.isArray(relic.effects) || relic.effects.length === 0) errors.push(`Relic ${key} needs at least one effect.`);
-    relic.effects?.forEach((effect, index) => {
-      if (!relicEffects.includes(effect.type)) errors.push(`Relic ${key} effect ${index + 1} has invalid type.`);
-      validateInteger(effect.amount, `Relic ${key} effect ${index + 1} amount`, errors);
-      if (effect.type === "applyStatus" && !statuses.includes(effect.status ?? "")) errors.push(`Relic ${key} applyStatus needs a valid status.`);
-    });
+    relic.effects?.forEach((effect, index) => errors.push(...validateGameEffect(effect, `Relic ${key} effect ${index + 1}`)));
   });
 
   return { valid: errors.length === 0, errors };
@@ -163,8 +159,6 @@ function validateEffects(effects: unknown, label: string, errors: string[]) {
     return;
   }
   effects.forEach((effect, index) => {
-    const item = effect as { type?: string; amount?: number };
-    if (!effectTypes.includes(item.type ?? "")) errors.push(`${label} ${index + 1} has invalid type.`);
-    validateInteger(item.amount as number, `${label} ${index + 1} amount`, errors);
+    errors.push(...validateGameEffect(effect, `${label} ${index + 1}`));
   });
 }
