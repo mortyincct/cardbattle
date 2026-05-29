@@ -36,6 +36,7 @@ export function App() {
           <Meter icon={<Heart />} label="HP" value={`${run.player.hp}/${run.player.maxHp}`} tone="blood" />
           <Meter icon={<Coins />} label="Gold" value={run.player.gold} tone="gold" />
           <Meter icon={<Activity />} label="Threat" value={run.threat} tone="threat" />
+          <Meter icon={<Map />} label="Act" value={run.act} />
           <Meter icon={<Map />} label="Steps" value={run.movesTaken} />
         </div>
         <button className="toolButton" onClick={() => setMode(mode === "game" ? "editor" : "game")}>
@@ -51,7 +52,7 @@ export function App() {
       <>
       <section className="statusLine">
         <span>{run.message}</span>
-        <span>Current: {labelNode(currentNode)}</span>
+        <span>Current: {labelNode(currentNode, pack)}</span>
         <span>Next enemy tier: +{Math.round((run.threat + 1) * 7.5)}% HP / +{Math.round((run.threat + 1) * 5.5)}% damage</span>
       </section>
 
@@ -59,7 +60,7 @@ export function App() {
         <CombatView run={run} pack={pack} selectedEnemy={selectedTarget} onSelectEnemy={setSelectedEnemy} onPlay={(card) => setRun(playCard(run, card.uid, selectedTarget?.instanceId))} onEndTurn={() => setRun(endTurn(run))} />
       ) : (
         <div className="layout">
-          <MapView run={run} onMove={(nodeId) => setRun(moveToNode(run, nodeId))} />
+          <MapView run={run} pack={pack} onMove={(nodeId) => setRun(moveToNode(run, nodeId))} />
           <SidePanel run={run} pack={pack} setRun={setRun} reset={reset} />
         </div>
       )}
@@ -79,7 +80,7 @@ function Meter({ icon, label, value, tone = "" }: { icon: React.ReactNode; label
   );
 }
 
-function MapView({ run, onMove }: { run: RunState; onMove: (nodeId: string) => void }) {
+function MapView({ run, pack, onMove }: { run: RunState; pack: ContentPack; onMove: (nodeId: string) => void }) {
   const current = run.map.find((node) => node.id === run.currentNodeId)!;
   return (
     <section className="mapStage">
@@ -102,10 +103,10 @@ function MapView({ run, onMove }: { run: RunState; onMove: (nodeId: string) => v
             className={`node ${node.type} ${node.id === run.currentNodeId ? "current" : ""} ${node.completed ? "done" : ""} ${node.visible ? "visible" : "hidden"}`}
             style={{ left: `${node.x}%`, top: `${node.y}%` }}
             disabled={!reachable}
-            title={labelNode(node)}
+            title={labelNode(node, pack)}
             onClick={() => onMove(node.id)}
           >
-            {nodeIcon(node.type)}
+            <span className="nodeGlyph" aria-hidden="true">{nodeIcon(node.type)}</span>
           </button>
         );
       })}
@@ -269,8 +270,9 @@ function StatusList({ statuses }: { statuses: { id: string; amount: number }[] }
   return <span className="statuses">{statuses.map((status) => `${status.id} ${status.amount}`).join(" · ")}</span>;
 }
 
-function labelNode(node?: MapNode) {
+function labelNode(node?: MapNode, pack?: ContentPack) {
   if (!node) return "Unknown";
+  if (node.type === "boss" && node.encounterId) return pack?.enemies.find((enemy) => enemy.id === node.encounterId)?.name ?? "Boss";
   return node.type.charAt(0).toUpperCase() + node.type.slice(1);
 }
 

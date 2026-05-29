@@ -192,7 +192,10 @@ h2 {
 
 .mapStage {
   position: relative;
-  min-height: 670px;
+  justify-self: center;
+  width: min(100%, 760px);
+  aspect-ratio: 1 / 1;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(242, 238, 229, 0.12);
   background:
@@ -221,12 +224,29 @@ h2 {
 
 .node {
   position: absolute;
+  display: grid;
+  place-items: center;
   transform: translate(-50%, -50%);
   width: 46px;
   height: 46px;
+  padding: 0;
   border-radius: 50%;
+  appearance: none;
+  line-height: 1;
+  text-align: center;
+  font-size: 1.05rem;
   font-weight: 800;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+.nodeGlyph {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  line-height: 1;
+  pointer-events: none;
+  transform: translateY(-1px);
 }
 
 .node.hidden {
@@ -663,7 +683,7 @@ h2 {
   }
 
   .mapStage {
-    min-height: 560px;
+    width: min(100%, 640px);
   }
 
   .node {
@@ -678,7 +698,7 @@ h2 {
   }
 
   .mapStage {
-    min-height: 500px;
+    width: 100%;
   }
 
   .meters,

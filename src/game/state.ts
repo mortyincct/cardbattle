@@ -3,7 +3,9 @@ import { mulberry32, pick, shuffle, uid } from "./rng";
 import type { CardDefinition, CardInstance, CombatState, ContentPack, Effect, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicEffect, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 3;
+export const MAX_ACT = 3;
+const BOSS_NODE_COUNT = 3;
 
 const starterDeckIds = ["strike", "strike", "strike", "strike", "strike", "guard", "guard", "guard", "guard", "omen"];
 
@@ -21,12 +23,13 @@ export function cardDefFrom(card: CardInstance, pack: ContentPack): CardDefiniti
 
 export function newRun(seed = Date.now()): RunState {
   const contentPack = loadContentPack();
-  const random = mulberry32(seed);
+  const random = mulberry32(seed + 1 * 1009);
   const deck = starterDeckIds.map((id) => makeCard(id));
-  const map = generateMap(random);
+  const map = generateMap(random, 1, contentPack);
   const run: RunState = {
     saveVersion: SAVE_VERSION,
     seed,
+    act: 1,
     screen: "map",
     contentPack,
     player: { maxHp: 72, hp: 72, block: 0, energy: 3, maxEnergy: 3, gold: 60, statuses: [] },
@@ -51,37 +54,72 @@ export function loadRun(): RunState | undefined {
   const raw = localStorage.getItem(SAVE_KEY);
   if (!raw) return undefined;
   const parsed = JSON.parse(raw) as RunState;
-  return parsed.saveVersion === SAVE_VERSION ? parsed : undefined;
+  if (parsed.saveVersion === SAVE_VERSION) return parsed;
+  if (parsed.saveVersion === 1 || parsed.saveVersion === 2) return migrateLegacyRun(parsed);
+  return undefined;
+}
+
+function migrateLegacyRun(run: RunState): RunState {
+  const act = run.act ?? 1;
+  const pack = run.contentPack ?? loadContentPack();
+  return {
+    ...run,
+    saveVersion: SAVE_VERSION,
+    act,
+    contentPack: pack,
+    screen: "map",
+    currentNodeId: "start",
+    combat: undefined,
+    pendingReward: undefined,
+    activeEvent: undefined,
+    shopOffer: undefined,
+    map: generateMap(mulberry32(run.seed + act * 1009), act, pack),
+    message: `Act ${act} begins. Choose a new path.`
+  };
 }
 
 export function clearSave() {
   localStorage.removeItem(SAVE_KEY);
 }
 
-export function generateMap(random: () => number): MapNode[] {
-  const nodes: MapNode[] = [{ id: "start", type: "start", x: 50, y: 92, neighbors: [], completed: true, visible: true }];
-  const rows: { type: NodeType; count: number; y: number }[] = [
-    { type: "combat", count: 4, y: 78 },
-    { type: "event", count: 5, y: 64 },
-    { type: "elite", count: 4, y: 50 },
-    { type: "shop", count: 5, y: 36 },
-    { type: "campfire", count: 4, y: 22 }
+export function generateMap(random: () => number, act = 1, pack: ContentPack = loadContentPack()): MapNode[] {
+  const nodes: MapNode[] = [{ id: "start", type: "start", x: 50, y: 50, neighbors: [], completed: true, visible: true }];
+  const rings: { count: number; radius: number; variants: NodeType[] }[] = [
+    { count: 8, radius: 17, variants: ["combat", "combat", "event", "treasure"] },
+    { count: 12, radius: 30, variants: ["combat", "event", "elite", "shop", "treasure", "combat"] },
+    { count: 16, radius: 42, variants: ["combat", "elite", "campfire", "shop", "event", "treasure", "combat", "elite"] }
   ];
-  rows.forEach((row, rowIndex) => {
-    for (let i = 0; i < row.count; i += 1) {
-      const variants: NodeType[] = row.type === "event" ? ["combat", "event", "treasure", "combat", "event"] : row.type === "shop" ? ["shop", "combat", "event", "treasure", "shop"] : [row.type];
+  rings.forEach((ring, ringIndex) => {
+    const angleOffset = -Math.PI / 2 + ringIndex * 0.11 + (random() - 0.5) * 0.08;
+    for (let i = 0; i < ring.count; i += 1) {
+      const angle = angleOffset + (Math.PI * 2 * i) / ring.count + (random() - 0.5) * 0.08;
       nodes.push({
-        id: `r${rowIndex}-${i}`,
-        type: pick(variants, random),
-        x: 14 + (72 / Math.max(1, row.count - 1)) * i + (random() - 0.5) * 5,
-        y: row.y + (random() - 0.5) * 4,
+        id: `ring${ringIndex}-${i}`,
+        type: pick(ring.variants, random),
+        x: clamp(50 + Math.cos(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
+        y: clamp(50 + Math.sin(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
         neighbors: [],
         completed: false,
-        visible: rowIndex === 0
+        visible: ringIndex === 0
       });
     }
   });
-  nodes.push({ id: "boss", type: "boss", x: 50, y: 7, neighbors: [], completed: false, visible: false });
+  const bossPool = pack.enemies.filter((enemy) => enemy.tier === "boss");
+  const bossOffset = bossPool.length ? Math.floor(random() * bossPool.length) : 0;
+  const bossNodes = Array.from({ length: BOSS_NODE_COUNT }, (_, index) => {
+    const encounter = bossPool.length ? bossPool[(bossOffset + index) % bossPool.length] : undefined;
+    return {
+      id: `boss-${index}`,
+      type: "boss" as const,
+      encounterId: encounter?.id,
+      x: [50, 8, 92][index],
+      y: [6, 82, 82][index],
+      neighbors: [],
+      completed: false,
+      visible: false
+    };
+  });
+  nodes.push(...bossNodes);
 
   const connect = (a: string, b: string) => {
     const left = nodes.find((node) => node.id === a)!;
@@ -89,17 +127,20 @@ export function generateMap(random: () => number): MapNode[] {
     if (!left.neighbors.includes(b)) left.neighbors.push(b);
     if (!right.neighbors.includes(a)) right.neighbors.push(a);
   };
-  nodes.filter((node) => node.id.startsWith("r0")).forEach((node) => connect("start", node.id));
-  rows.forEach((_, rowIndex) => {
-    const rowNodes = nodes.filter((node) => node.id.startsWith(`r${rowIndex}-`));
-    rowNodes.forEach((node, i) => {
-      if (rowNodes[i + 1]) connect(node.id, rowNodes[i + 1].id);
-      const nextRow = nodes.filter((candidate) => candidate.id.startsWith(`r${rowIndex + 1}-`));
-      if (nextRow.length) {
-        connect(node.id, nextRow[Math.min(nextRow.length - 1, i)].id);
-        connect(node.id, nextRow[Math.min(nextRow.length - 1, i + 1)].id);
+  rings.forEach((_, ringIndex) => {
+    const ringNodes = nodes.filter((node) => node.id.startsWith(`ring${ringIndex}-`));
+    ringNodes.forEach((node, i) => {
+      connect(node.id, ringNodes[(i + 1) % ringNodes.length].id);
+      if (ringIndex === 0) connect("start", node.id);
+      const outerRing = nodes.filter((candidate) => candidate.id.startsWith(`ring${ringIndex + 1}-`));
+      if (outerRing.length) {
+        const mapped = Math.round((i / ringNodes.length) * outerRing.length) % outerRing.length;
+        connect(node.id, outerRing[mapped].id);
+        connect(node.id, outerRing[(mapped + 1) % outerRing.length].id);
       } else {
-        connect(node.id, "boss");
+        const orderedBosses = [...bossNodes].sort((a, b) => distance(node, a) - distance(node, b));
+        connect(node.id, orderedBosses[0].id);
+        if (distance(node, orderedBosses[1]) < 32) connect(node.id, orderedBosses[1].id);
       }
     });
   });
@@ -167,7 +208,10 @@ export function completeNode(run: RunState): RunState {
 export function startCombat(run: RunState, nodeType: NodeType): CombatState {
   const random = mulberry32(run.seed + run.movesTaken * 97);
   const tier = nodeType === "boss" ? "boss" : nodeType === "elite" ? "elite" : "normal";
-  const candidates = getContentPack(run).enemies.filter((enemy) => enemy.tier === tier);
+  const node = run.map.find((item) => item.id === run.currentNodeId);
+  const pack = getContentPack(run);
+  const boundEnemy = node?.encounterId ? pack.enemies.find((enemy) => enemy.id === node.encounterId && enemy.tier === tier) : undefined;
+  const candidates = boundEnemy ? [boundEnemy] : pack.enemies.filter((enemy) => enemy.tier === tier);
   const count = tier === "normal" && random() > 0.45 ? 2 : 1;
   const enemyStates = Array.from({ length: count }, () => toEnemyState(pick(candidates, random), run.threat));
   const drawPile = shuffle(run.deck.map((card) => ({ ...card })), random);
@@ -301,11 +345,7 @@ function winCombat(run: RunState): RunState {
   applyRelics(run, "combatWon");
   const node = run.map.find((item) => item.id === run.currentNodeId);
   if (node?.type === "boss") {
-    run.screen = "gameover";
-    run.victory = true;
-    run.message = "The Rootless Heart breaks. You win.";
-    clearSave();
-    return run;
+    return run.act < MAX_ACT ? advanceAct(run) : winRun(run);
   }
   run.player.block = 0;
   run.player.statuses = run.player.statuses.filter((status) => status.id === "strength" || status.id === "thorns");
@@ -314,6 +354,29 @@ function winCombat(run: RunState): RunState {
   run.player.gold += run.pendingReward.amount ?? 0;
   run.screen = "reward";
   run.message = "Victory. Choose a card reward.";
+  return run;
+}
+
+function advanceAct(run: RunState): RunState {
+  run.act += 1;
+  run.player.block = 0;
+  run.player.statuses = run.player.statuses.filter((status) => status.id === "strength" || status.id === "thorns");
+  run.combat = undefined;
+  run.pendingReward = undefined;
+  run.activeEvent = undefined;
+  run.shopOffer = undefined;
+  run.screen = "map";
+  run.currentNodeId = "start";
+  run.map = generateMap(mulberry32(run.seed + run.act * 1009), run.act, getContentPack(run));
+  run.message = `Act ${run.act} begins. Choose a new path.`;
+  return run;
+}
+
+function winRun(run: RunState): RunState {
+  run.screen = "gameover";
+  run.victory = true;
+  run.message = `The Act ${MAX_ACT} boss falls. The Rootless Paths open.`;
+  clearSave();
   return run;
 }
 
@@ -464,6 +527,10 @@ function upgradeRandom(run: RunState) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function distance(a: Pick<MapNode, "x" | "y">, b: Pick<MapNode, "x" | "y">) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function clone<T>(value: T): T {

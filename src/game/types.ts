@@ -99,6 +99,7 @@ export interface PlayerState {
 export interface MapNode {
   id: string;
   type: NodeType;
+  encounterId?: string;
   x: number;
   y: number;
   neighbors: string[];
@@ -139,6 +140,7 @@ export interface GameEvent {
 export interface RunState {
   saveVersion: number;
   seed: number;
+  act: number;
   screen: Screen;
   contentPack?: ContentPack;
   player: PlayerState;
