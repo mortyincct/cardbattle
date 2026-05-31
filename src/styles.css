@@ -543,11 +543,34 @@ h2 {
   gap: 12px;
 }
 
-.field,
-.checkField {
+.field {
   display: grid;
   gap: 5px;
   font-size: 0.9rem;
+}
+
+.checkField {
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  min-height: 36px;
+  gap: 8px;
+  font-size: 0.9rem;
+  line-height: 1.3;
+}
+
+.checkField input[type="checkbox"],
+.checkField input[type="radio"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #e0b05c;
+}
+
+.checkField span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .field.wide,
@@ -1101,6 +1124,10 @@ h2 {
   display: grid;
   align-content: start;
   gap: 10px;
+}
+
+.fileInput {
+  display: none;
 }
 
 .confirmBackdrop {

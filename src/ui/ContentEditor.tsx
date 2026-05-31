@@ -1,5 +1,5 @@
 import { AlertTriangle, Copy, Download, Plus, RotateCcw, Save, Search, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { cardFilters, cardTypes, cardZones, clearContentDraft, defaultContentPack, effectOps, effectParams, effectTargets, intents, normalizeContentPack, rarities, relicTriggers, saveContentDraft, statuses, tiers, validateContentPack } from "../game/content";
 import type { CardDefinition, CardType, CharacterDefinition, ContentPack, Effect, EffectCondition, EnemyDefinition, EnemyMove, Rarity, RelicDefinition, RelicTrigger, TriggeredEffect } from "../game/types";
@@ -8,6 +8,22 @@ type EditorTab = "cards" | "enemies" | "relics" | "characters";
 type ConfirmAction = "delete" | "reset" | "import" | null;
 type EditorMessage = { tone: "info" | "success" | "warn"; text: string };
 type EditorItem = { id: string; name: string; meta: string; tone: string };
+type FilePickerAcceptType = { description?: string; accept: Record<string, string[]> };
+type SaveFilePickerOptions = { suggestedName?: string; types?: FilePickerAcceptType[] };
+type OpenFilePickerOptions = { multiple?: boolean; types?: FilePickerAcceptType[] };
+type WritableFileStream = {
+  write: (data: BlobPart) => Promise<void>;
+  close: () => Promise<void>;
+};
+type FileHandle = {
+  name: string;
+  getFile: () => Promise<File>;
+  createWritable?: () => Promise<WritableFileStream>;
+};
+type WindowWithFilePickers = Window & {
+  showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileHandle>;
+  showOpenFilePicker?: (options?: OpenFilePickerOptions) => Promise<FileHandle[]>;
+};
 
 const tabs: { id: EditorTab; label: string }[] = [
   { id: "cards", label: "Cards" },
@@ -17,6 +33,11 @@ const tabs: { id: EditorTab; label: string }[] = [
 ];
 
 const tabNouns: Record<EditorTab, string> = { cards: "card", enemies: "enemy", relics: "relic", characters: "character" };
+const importDataStart = "--- NETSPIRE_CONTENT_JSON_START ---";
+const importDataEnd = "--- NETSPIRE_CONTENT_JSON_END ---";
+const contentFileTypes: FilePickerAcceptType[] = [
+  { description: "Netspire content files", accept: { "text/plain": [".txt"], "application/json": [".json"] } }
+];
 
 export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentPack; onNewRun: () => void }) {
   const [pack, setPack] = useState<ContentPack>(() => normalizeContentPack(clone(initialPack)));
@@ -27,9 +48,11 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
   const [pendingImport, setPendingImport] = useState<ContentPack | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [message, setMessage] = useState<EditorMessage>({ tone: "info", text: "Changes are saved as a draft before they affect new runs." });
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileImportAppliesRef = useRef(false);
 
   const validation = useMemo(() => validateContentPack(pack), [pack]);
-  const exportText = useMemo(() => JSON.stringify(pack, null, 2), [pack]);
+  const exportText = useMemo(() => formatReadableExport(pack), [pack]);
   const selectedItem = getSelectedItem(pack, tab, selected);
   const selectionErrors = errorsForSelection(validation.errors, tab, selected);
   const otherErrors = validation.errors.filter((error) => !selectionErrors.includes(error));
@@ -57,9 +80,79 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
     if (startNewRun) onNewRun();
   };
 
-  const prepareImport = () => {
+  const prepareImport = () => prepareImportFromText(importText);
+
+  const downloadExport = () => {
+    const blob = new Blob([exportText], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `netspire-content-${new Date().toISOString().slice(0, 10)}.txt`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setMessage({ tone: "success", text: "Readable export downloaded." });
+  };
+
+  const exportToChosenPath = async () => {
+    const picker = window as WindowWithFilePickers;
+    if (!picker.showSaveFilePicker) {
+      downloadExport();
+      setMessage({ tone: "info", text: "This browser used the download fallback. Choose the save path in the download prompt." });
+      return;
+    }
     try {
-      const parsed = normalizeContentPack(JSON.parse(importText) as Partial<ContentPack>);
+      const handle = await picker.showSaveFilePicker({
+        suggestedName: `netspire-content-${new Date().toISOString().slice(0, 10)}.txt`,
+        types: contentFileTypes
+      });
+      const writable = await handle.createWritable?.();
+      if (!writable) throw new Error("This browser cannot write to the chosen file.");
+      await writable.write(exportText);
+      await writable.close();
+      setMessage({ tone: "success", text: `Export written to ${handle.name}.` });
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setMessage({ tone: "warn", text: error instanceof Error ? error.message : "Export failed." });
+    }
+  };
+
+  const loadImportFile = (file?: File, applyImmediately = false) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      setImportText(text);
+      if (applyImmediately) {
+        prepareImportFromText(text, `Loaded ${file.name}. Confirm to copy it into the active draft.`);
+      } else {
+        setMessage({ tone: "info", text: `Loaded ${file.name}. Review it, then import to draft.` });
+      }
+    };
+    reader.onerror = () => setMessage({ tone: "warn", text: "Could not read that import file." });
+    reader.readAsText(file);
+  };
+
+  const importFromChosenPath = async () => {
+    const picker = window as WindowWithFilePickers;
+    if (!picker.showOpenFilePicker) {
+      fileImportAppliesRef.current = true;
+      importFileInputRef.current?.click();
+      setMessage({ tone: "info", text: "This browser used the file input fallback. Choose a content file to load." });
+      return;
+    }
+    try {
+      const [handle] = await picker.showOpenFilePicker({ multiple: false, types: contentFileTypes });
+      const file = await handle.getFile();
+      loadImportFile(file, true);
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setMessage({ tone: "warn", text: error instanceof Error ? error.message : "Import file selection failed." });
+    }
+  };
+
+  const prepareImportFromText = (text: string, successText?: string) => {
+    try {
+      const parsed = parseContentImport(text);
       const result = validateContentPack(parsed);
       if (!result.valid) {
         setMessage({ tone: "warn", text: `Import rejected: ${result.errors[0]}` });
@@ -67,8 +160,9 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
       }
       setPendingImport(parsed);
       setConfirmAction("import");
-    } catch {
-      setMessage({ tone: "warn", text: "Import rejected: invalid JSON." });
+      if (successText) setMessage({ tone: "info", text: successText });
+    } catch (error) {
+      setMessage({ tone: "warn", text: error instanceof Error ? error.message : "Import rejected." });
     }
   };
 
@@ -93,7 +187,8 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
       const next = clone(pendingImport);
       setPack(next);
       setSelected(firstId(next, tab));
-      setMessage({ tone: "success", text: "JSON imported into the current draft." });
+      saveContentDraft(next);
+      setMessage({ tone: "success", text: "Content imported and copied into the active draft path." });
       setPendingImport(null);
     }
     setConfirmAction(null);
@@ -155,11 +250,21 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
       </div>
 
       <section className="jsonTools">
-        <label>Export JSON<textarea readOnly value={exportText} /></label>
-        <label>Import JSON<textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="Paste a ContentPack JSON draft." /></label>
+        <label>Readable export<textarea readOnly value={exportText} /></label>
+        <label>Import text<textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="Paste a readable export or ContentPack JSON draft." /></label>
         <div className="jsonToolActions">
-          <button className="toolButton" onClick={prepareImport}><Upload /> Import to draft</button>
-          <button className="toolButton" onClick={() => setMessage({ tone: "info", text: "Export JSON is ready in the text box." })}><Download /> Export ready</button>
+          <button className="toolButton" onClick={prepareImport}><Upload /> Import and apply</button>
+          <button className="toolButton" onClick={exportToChosenPath}><Download /> Export to path</button>
+          <button className="toolButton" onClick={importFromChosenPath}><Upload /> Import from path</button>
+          <button className="toolButton" onClick={() => {
+            fileImportAppliesRef.current = false;
+            importFileInputRef.current?.click();
+          }}><Upload /> Load only</button>
+          <input ref={importFileInputRef} className="fileInput" type="file" accept=".txt,.json,application/json,text/plain" onChange={(event) => {
+            loadImportFile(event.target.files?.[0], fileImportAppliesRef.current);
+            fileImportAppliesRef.current = false;
+            event.currentTarget.value = "";
+          }} />
         </div>
       </section>
 
@@ -387,7 +492,7 @@ function ConfirmDialog({ action, tab, selectedName, onCancel, onConfirm }: { act
   const copy = {
     delete: { title: `Delete ${tabNouns[tab]}`, body: `Delete "${selectedName}" from the current draft?`, confirm: "Delete" },
     reset: { title: "Reset defaults", body: "Clear the browser draft and restore default content?", confirm: "Reset" },
-    import: { title: "Import JSON", body: "Importing replaces the current editor draft, but does not save it yet.", confirm: "Import" }
+    import: { title: "Import content", body: "Importing replaces the editor draft and saves it as the active content for new runs.", confirm: "Import and apply" }
   }[action];
   return (
     <div className="confirmBackdrop" role="presentation">
@@ -418,7 +523,214 @@ function SelectField({ label, value, options, onChange }: { label: string; value
 }
 
 function CheckField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return <label className="checkField"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /> {label}</label>;
+  return <label className="checkField"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>;
+}
+
+function formatReadableExport(pack: ContentPack) {
+  const normalized = normalizeContentPack(pack);
+  const lines: string[] = [
+    "Netspire Content Editor Export",
+    `Generated: ${new Date().toLocaleString()}`,
+    `Default character: ${normalized.characters[normalized.defaultCharacterId]?.name ?? "Unknown"} (${normalized.defaultCharacterId})`,
+    `Totals: ${Object.keys(normalized.cards).length} cards, ${normalized.enemies.length} enemies, ${Object.keys(normalized.relics).length} relics, ${Object.keys(normalized.characters).length} characters`,
+    "",
+    "Cards"
+  ];
+
+  Object.values(normalized.cards).forEach((card, index) => {
+    lines.push(
+      `${index + 1}. ${card.name} [${card.id}]`,
+      `   Kind: ${card.rarity} ${card.type}, costs ${card.cost} energy.`,
+      `   Text: ${card.description || "No description."}`,
+      `   Upgrade: ${card.upgradedDescription || "No upgraded description."}`,
+      `   Flags: ${flagList([["exhausts after play", card.exhaust], ["ethereal", card.ethereal]])}`
+    );
+    pushEffectList(lines, "   Base effects", card.effects);
+    pushEffectList(lines, "   Upgraded effects", card.upgradedEffects);
+    lines.push("");
+  });
+
+  lines.push("Enemies");
+  normalized.enemies.forEach((enemy, index) => {
+    lines.push(
+      `${index + 1}. ${enemy.name} [${enemy.id}]`,
+      `   Tier: ${enemy.tier}. HP: ${enemy.maxHp}. Starting physical armor: ${enemy.armor}.`,
+      "   Moves:"
+    );
+    enemy.moves.forEach((move, moveIndex) => {
+      lines.push(`     ${moveIndex + 1}. ${move.label} [${move.id}] - intent: ${move.intent}.`);
+      pushEffectList(lines, "        Effects", move.effects ?? []);
+    });
+    lines.push("");
+  });
+
+  lines.push("Relics");
+  Object.values(normalized.relics).forEach((relic, index) => {
+    lines.push(
+      `${index + 1}. ${relic.name} [${relic.id}]`,
+      `   Rarity: ${relic.rarity}. Trigger: ${readableTrigger(relic.trigger)}.`,
+      `   Text: ${relic.description || "No description."}`
+    );
+    pushEffectList(lines, "   Effects", relic.effects);
+    lines.push("");
+  });
+
+  lines.push("Characters");
+  Object.values(normalized.characters).forEach((character, index) => {
+    lines.push(
+      `${index + 1}. ${character.name} [${character.id}]${character.id === normalized.defaultCharacterId ? " - default" : ""}`,
+      `   Starts with ${character.maxHp} HP, ${character.maxEnergy} max energy, and ${character.gold} gold.`,
+      `   Starter deck: ${character.starterDeck.join(", ") || "none"}.`,
+      `   Starter relics: ${character.starterRelics.join(", ") || "none"}.`
+    );
+    if (character.passives.length) {
+      lines.push("   Passives:");
+      character.passives.forEach((passive, passiveIndex) => {
+        lines.push(`     ${passiveIndex + 1}. On ${readableTrigger(passive.trigger)}${passive.oncePerCombat ? " once per combat" : ""}:`);
+        pushEffectList(lines, "        Effects", passive.effects);
+        if (passive.condition) lines.push(`        Condition: ${JSON.stringify(passive.condition)}`);
+      });
+    } else {
+      lines.push("   Passives: none.");
+    }
+    lines.push("");
+  });
+
+  lines.push(
+    "Import data",
+    "The editor uses the block below to restore this exact content.",
+    importDataStart,
+    JSON.stringify(normalized),
+    importDataEnd
+  );
+
+  return lines.join("\n");
+}
+
+function parseContentImport(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("Import rejected: paste or load content first.");
+  const embedded = extractImportData(trimmed);
+  const raw = embedded ?? trimmed;
+  try {
+    return normalizeContentPack(JSON.parse(raw) as Partial<ContentPack>);
+  } catch {
+    throw new Error(embedded ? "Import rejected: the embedded import data is invalid." : "Import rejected: paste a readable export from this editor or raw ContentPack JSON.");
+  }
+}
+
+function extractImportData(text: string) {
+  const start = text.indexOf(importDataStart);
+  const end = text.indexOf(importDataEnd);
+  if (start === -1 || end === -1 || end <= start) return undefined;
+  return text.slice(start + importDataStart.length, end).trim();
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function pushEffectList(lines: string[], title: string, effects: Effect[]) {
+  const indent = title.match(/^\s*/)?.[0] ?? "";
+  lines.push(`${title}:`);
+  if (!effects.length) {
+    lines.push(`${indent}  - No effects.`);
+    return;
+  }
+  effects.forEach((effect) => lines.push(`${indent}  - ${describeEffect(effect)}`));
+}
+
+function describeEffect(effect: Effect) {
+  const target = readableTarget(effect.target);
+  const amount = effect.amount ?? 0;
+  const times = effect.times && effect.times > 1 ? `, repeated ${effect.times} times` : "";
+  const condition = effect.condition ? `, if ${describeCondition(effect.condition)}` : "";
+  const cardFilter = effect.cardFilter && effect.cardFilter !== "any" ? `, filtered to ${effect.cardFilter} cards` : "";
+
+  if (effect.op === "clear") return `${capitalize(target)} clears ${readableParam(effect.param)}${condition}.`;
+  if (effect.param === "statusAmount") return `${capitalize(target)} ${opVerb(effect.op)} ${amount} ${effect.status ?? "status"}${times}${condition}.`;
+  if (effect.param === "cards") {
+    const zoneMove = effect.op === "move" ? ` from ${effect.fromZone ?? "drawPile"} to ${effect.toZone ?? "hand"}` : "";
+    return `${capitalize(target)} ${opVerb(effect.op)} ${amount} card${amount === 1 ? "" : "s"}${zoneMove}${cardFilter}${times}${condition}.`;
+  }
+  return `${capitalize(target)} ${opVerb(effect.op)} ${amount} ${readableParam(effect.param)}${cardFilter}${times}${condition}.`;
+}
+
+function describeCondition(condition: EffectCondition) {
+  const target = condition.target ? `${readableTarget(condition.target)} ` : "";
+  const value = condition.status ? `${condition.amount ?? 0} ${condition.status}` : `${condition.amount ?? 0}`;
+  return `${target}${readableParam(condition.param)} is ${condition.op} ${value}`;
+}
+
+function flagList(flags: Array<[string, boolean | undefined]>) {
+  const enabled = flags.filter(([, value]) => Boolean(value)).map(([label]) => label);
+  return enabled.length ? enabled.join(", ") : "none";
+}
+
+function opVerb(op: Effect["op"]) {
+  return {
+    add: "gains",
+    subtract: "loses",
+    set: "sets",
+    multiply: "multiplies",
+    move: "moves",
+    create: "creates",
+    remove: "removes",
+    clear: "clears"
+  }[op];
+}
+
+function readableParam(param: Effect["param"]) {
+  return {
+    hp: "HP",
+    maxHp: "max HP",
+    physicalDamage: "physical damage",
+    magicDamage: "magic damage",
+    physicalArmor: "physical armor",
+    magicArmor: "magic armor",
+    energy: "energy",
+    maxEnergy: "max energy",
+    gold: "gold",
+    statusAmount: "status",
+    upgraded: "upgrade state",
+    cost: "cost",
+    cards: "cards",
+    turn: "turn count",
+    threat: "threat",
+    movesTaken: "moves taken"
+  }[param];
+}
+
+function readableTarget(target: Effect["target"]) {
+  return {
+    self: "self",
+    selectedEnemy: "selected enemy",
+    player: "player",
+    sourceOwner: "source owner",
+    allEnemies: "all enemies",
+    randomEnemy: "a random enemy",
+    allCombatants: "all combatants"
+  }[target];
+}
+
+function readableTrigger(trigger: RelicTrigger) {
+  return {
+    runStart: "run start",
+    combatStart: "combat start",
+    turnStart: "turn start",
+    turnEnd: "turn end",
+    cardPlayed: "card played",
+    beforeDamageTaken: "before damage is taken",
+    playerDamaged: "player damaged",
+    enemyKilled: "enemy killed",
+    combatWon: "combat won",
+    cardDrawn: "card drawn",
+    statusApplied: "status applied"
+  }[trigger];
+}
+
+function capitalize(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function EmptyForm({ noun }: { noun: string }) {
