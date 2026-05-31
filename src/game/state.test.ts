@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { chooseRewardCard, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, SAVE_KEY, SAVE_VERSION, scaleEnemy, startCombat } from "./state";
-import { CONTENT_DRAFT_KEY, defaultContentPack, enemies, saveContentDraft, validateContentPack } from "./content";
+import { CONTENT_DRAFT_KEY, defaultContentPack, enemies, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
 
 beforeEach(() => {
   localStorage.removeItem(CONTENT_DRAFT_KEY);
@@ -40,10 +40,14 @@ describe("map movement", () => {
 
 describe("threat scaling", () => {
   it("scales enemy health and damage from a single function", () => {
-    const base = enemies.find((enemy) => enemy.tier === "normal" && enemy.moves.some((move) => move.damage))!;
+    const base = enemies.find((enemy) => enemy.tier === "normal" && enemy.moves.some((move) => move.effects?.some((effect) => effect.param === "hp" && effect.target === "player")))!;
     const scaled = scaleEnemy(base, 8);
     expect(scaled.maxHp).toBeGreaterThan(base.maxHp);
-    expect(scaled.moves.some((move, index) => (move.damage ?? 0) > (base.moves[index].damage ?? 0))).toBe(true);
+    expect(scaled.moves.some((move, index) => {
+      const scaledDamage = move.effects?.find((effect) => effect.param === "hp" && effect.target === "player")?.amount ?? 0;
+      const baseDamage = base.moves[index].effects?.find((effect) => effect.param === "hp" && effect.target === "player")?.amount ?? 0;
+      return scaledDamage > baseDamage;
+    })).toBe(true);
   });
 });
 
@@ -121,6 +125,65 @@ describe("combat flow", () => {
     expect(run.screen).toBe("gameover");
     expect(run.victory).toBe(true);
   });
+
+  it("applies parameterized card effects across resources, statuses, cards, and run state", () => {
+    let run = newRun(77);
+    const pack = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    pack.cards.parameter_lab = {
+      id: "parameter_lab",
+      name: "Parameter Lab",
+      type: "skill",
+      rarity: "rare",
+      cost: 0,
+      description: "Exercise parameterized effects.",
+      upgradedDescription: "Exercise parameterized effects.",
+      effects: [
+        { target: "player", param: "maxHp", op: "add", amount: 2 },
+        { target: "player", param: "hp", op: "add", amount: 2 },
+        { target: "player", param: "maxEnergy", op: "add", amount: 1 },
+        { target: "player", param: "energy", op: "add", amount: 1 },
+        { target: "player", param: "gold", op: "add", amount: 5 },
+        { target: "player", param: "block", op: "add", amount: 3 },
+        { target: "player", param: "statusAmount", op: "add", status: "strength", amount: 1 },
+        { target: "player", param: "cards", op: "move", amount: 1, fromZone: "drawPile", toZone: "hand" },
+        { target: "player", param: "upgraded", op: "set", amount: 1, cardFilter: "notUpgraded" },
+        { target: "player", param: "cost", op: "set", amount: 0, cardFilter: "upgraded" },
+        { target: "player", param: "threat", op: "add", amount: 1 },
+        { target: "player", param: "movesTaken", op: "add", amount: 1 },
+        { target: "player", param: "turn", op: "add", amount: 1 }
+      ],
+      upgradedEffects: []
+    };
+    run.contentPack = pack;
+    run.screen = "combat";
+    run.combat = {
+      enemies: [{ instanceId: "enemy-1", definitionId: "hollow", name: "Test", maxHp: 30, hp: 30, block: 0, statuses: [], moveIndex: 0, intent: { id: "wait", intent: "defend", label: "Wait" } }],
+      drawPile: [{ uid: "drawn-1", cardId: "guard", upgraded: false }],
+      hand: [{ uid: "card-1", cardId: "parameter_lab", upgraded: false }],
+      discardPile: [],
+      exhaustPile: [],
+      turn: 1,
+      log: []
+    };
+    run.player.hp = 60;
+    const beforeGold = run.player.gold;
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.player.maxHp).toBe(74);
+    expect(run.player.hp).toBe(64);
+    expect(run.player.maxEnergy).toBe(4);
+    expect(run.player.energy).toBe(4);
+    expect(run.player.gold).toBe(beforeGold + 5);
+    expect(run.player.block).toBe(3);
+    expect(run.player.statuses).toContainEqual({ id: "strength", amount: 1 });
+    expect(run.combat?.hand.some((card) => card.uid === "drawn-1")).toBe(true);
+    expect(run.combat?.hand.find((card) => card.uid === "drawn-1")?.upgraded).toBe(true);
+    expect(run.combat?.hand.find((card) => card.uid === "drawn-1")?.cost).toBe(0);
+    expect(run.threat).toBe(1);
+    expect(run.movesTaken).toBe(1);
+    expect(run.combat?.turn).toBe(2);
+  });
 });
 
 describe("saves", () => {
@@ -162,11 +225,35 @@ describe("content packs", () => {
       enemies: [{ ...defaultContentPack.enemies[0], maxHp: 0, moves: [] }],
       relics: {
         bad: { ...defaultContentPack.relics.cracked_core, id: "bad", effects: [{ type: "applyStatus", amount: 1 }] }
-      }
+      },
+      characters: defaultContentPack.characters,
+      defaultCharacterId: defaultContentPack.defaultCharacterId
     };
-    const result = validateContentPack(invalid as typeof defaultContentPack);
+    const result = validateContentPack(invalid as unknown as typeof defaultContentPack);
     expect(result.valid).toBe(false);
     expect(result.errors.length).toBeGreaterThan(3);
+  });
+
+  it("rejects missing parameterized effect fields", () => {
+    const invalid = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    invalid.cards.strike.effects = [{ target: "selectedEnemy", param: "statusAmount", op: "add", amount: 1 } as never];
+    invalid.cards.guard.effects = [{ target: "player", param: "cards", op: "move", amount: 1 } as never];
+    const result = validateContentPack(invalid);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("valid status"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("fromZone"))).toBe(true);
+  });
+
+  it("migrates legacy effect schemas into parameter operations", () => {
+    const legacy = JSON.parse(JSON.stringify(defaultContentPack)) as Partial<typeof defaultContentPack>;
+    legacy.cards!.strike.effects = [{ type: "damage", amount: 6 } as never];
+    legacy.enemies![0].moves[0].effects = [{ type: "applyWeak", amount: 1 } as never];
+    legacy.relics!.cracked_core.effects = [{ type: "gainStrength", amount: 1 } as never];
+    const migrated = normalizeContentPack(legacy);
+    expect(migrated.cards.strike.effects[0]).toMatchObject({ target: "selectedEnemy", param: "hp", op: "subtract", amount: 6 });
+    expect(migrated.enemies[0]!.moves[0]!.effects![0]).toMatchObject({ target: "player", param: "statusAmount", status: "weak" });
+    expect(migrated.relics.cracked_core.effects[0]).toMatchObject({ target: "player", param: "statusAmount", status: "strength" });
+    expect(validateContentPack(migrated).valid).toBe(true);
   });
 
   it("requires card and relic keys to match edited ids", () => {

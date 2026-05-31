@@ -2,17 +2,41 @@ export type CardType = "attack" | "skill" | "power" | "status" | "curse";
 export type Rarity = "basic" | "common" | "uncommon" | "rare";
 export type NodeType = "start" | "combat" | "elite" | "event" | "campfire" | "shop" | "treasure" | "boss";
 export type Screen = "menu" | "map" | "combat" | "reward" | "event" | "shop" | "campfire" | "treasure" | "gameover";
-export type RelicTrigger = "runStart" | "combatStart" | "turnStart" | "cardPlayed" | "playerDamaged" | "combatWon";
+export type EffectTrigger = "runStart" | "combatStart" | "turnStart" | "turnEnd" | "cardPlayed" | "beforeDamageTaken" | "playerDamaged" | "enemyKilled" | "combatWon" | "cardDrawn" | "statusApplied";
+export type RelicTrigger = EffectTrigger;
+export type EffectTarget = "self" | "selectedEnemy" | "player" | "sourceOwner" | "allEnemies" | "randomEnemy" | "allCombatants";
+export type EffectParam = "hp" | "maxHp" | "block" | "energy" | "maxEnergy" | "gold" | "statusAmount" | "upgraded" | "cost" | "cards" | "turn" | "threat" | "movesTaken";
+export type EffectOperation = "add" | "subtract" | "set" | "multiply" | "move" | "create" | "remove" | "clear";
+export type CardZone = "drawPile" | "hand" | "discardPile" | "exhaustPile" | "deck";
+export type CardFilter = "any" | CardType | Rarity | "upgraded" | "notUpgraded";
+export type ConditionOperator = "equals" | "notEquals" | "greaterThan" | "greaterThanOrEqual" | "lessThan" | "lessThanOrEqual";
 
-export interface Effect {
-  type: "damage" | "block" | "draw" | "gainEnergy" | "applyWeak" | "applyVulnerable" | "applyPoison" | "heal" | "strength" | "thorns";
-  amount: number;
+export interface EffectCondition {
+  target?: EffectTarget;
+  param: EffectParam;
+  op: ConditionOperator;
+  amount?: number;
+  status?: StatusEffect["id"];
 }
 
-export interface RelicEffect {
-  type: "gainBlock" | "gainEnergy" | "draw" | "heal" | "gainGold" | "gainStrength" | "reduceDamage" | "applyStatus";
-  amount: number;
+export interface Effect {
+  target: EffectTarget;
+  param: EffectParam;
+  op: EffectOperation;
+  amount?: number;
   status?: StatusEffect["id"];
+  fromZone?: CardZone;
+  toZone?: CardZone;
+  cardFilter?: CardFilter;
+  times?: number;
+  condition?: EffectCondition;
+}
+
+export interface TriggeredEffect {
+  trigger: EffectTrigger;
+  effects: Effect[];
+  condition?: EffectCondition;
+  oncePerCombat?: boolean;
 }
 
 export interface CardDefinition {
@@ -33,10 +57,11 @@ export interface CardInstance {
   uid: string;
   cardId: string;
   upgraded: boolean;
+  cost?: number;
 }
 
 export interface StatusEffect {
-  id: "weak" | "vulnerable" | "poison" | "strength" | "thorns";
+  id: "weak" | "vulnerable" | "frail" | "poison" | "burn" | "bleed" | "strength" | "dexterity" | "thorns" | "regen" | "platedArmor" | "artifact" | "intangible";
   amount: number;
 }
 
@@ -65,13 +90,26 @@ export interface RelicDefinition {
   rarity: Rarity;
   description: string;
   trigger: RelicTrigger;
-  effects: RelicEffect[];
+  effects: Effect[];
+}
+
+export interface CharacterDefinition {
+  id: string;
+  name: string;
+  maxHp: number;
+  maxEnergy: number;
+  gold: number;
+  starterDeck: string[];
+  starterRelics: string[];
+  passives: TriggeredEffect[];
 }
 
 export interface ContentPack {
   cards: Record<string, CardDefinition>;
   enemies: EnemyDefinition[];
   relics: Record<string, RelicDefinition>;
+  characters: Record<string, CharacterDefinition>;
+  defaultCharacterId: string;
 }
 
 export interface EnemyState {
@@ -143,6 +181,7 @@ export interface RunState {
   act: number;
   screen: Screen;
   contentPack?: ContentPack;
+  characterId?: string;
   player: PlayerState;
   relics: string[];
   deck: CardInstance[];

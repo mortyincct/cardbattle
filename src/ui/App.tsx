@@ -204,7 +204,8 @@ function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn
       <div className="hand">
         {combat.hand.map((card) => {
           const def = cardDefFrom(card, pack);
-          const disabled = def.cost > run.player.energy || def.type === "status" || def.type === "curse";
+          const cost = card.cost ?? def.cost;
+          const disabled = cost > run.player.energy || def.type === "status" || def.type === "curse";
           return <CardButton key={card.uid} pack={pack} card={card} disabled={disabled} onClick={() => onPlay(card)} />;
         })}
       </div>
@@ -222,7 +223,7 @@ function CardButton({ card, pack, onClick, disabled, price }: { card: CardInstan
   const def = cardDefFrom(card, pack);
   return (
     <button className={`card ${def.type}`} onClick={onClick} disabled={disabled}>
-      <span className="cost">{def.cost}</span>
+      <span className="cost">{card.cost ?? def.cost}</span>
       <strong>{def.name}{card.upgraded ? "+" : ""}</strong>
       <small>{def.type} · {def.rarity}</small>
       <p>{card.upgraded ? def.upgradedDescription : def.description}</p>
@@ -283,6 +284,10 @@ function nodeIcon(type: string) {
 
 function intentText(enemy: EnemyState) {
   const move = enemy.intent;
-  const parts = [move.damage ? `${move.damage}x${move.hits ?? 1}` : "", move.block ? `Block ${move.block}` : "", move.effects?.length ? "Hex" : ""].filter(Boolean);
+  const parts = [
+    move.damage ? `${move.damage}x${move.hits ?? 1}` : "",
+    move.block ? `Block ${move.block}` : "",
+    ...(move.effects ?? []).map((effect) => `${effect.op} ${effect.amount ?? ""} ${effect.param}`.trim())
+  ].filter(Boolean);
   return parts.join(" + ") || move.label;
 }
