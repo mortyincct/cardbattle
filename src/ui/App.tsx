@@ -188,7 +188,8 @@ function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn
           <button key={enemy.instanceId} className={`enemy ${selectedEnemy?.instanceId === enemy.instanceId ? "selected" : ""}`} onClick={() => onSelectEnemy(enemy.instanceId)}>
             <strong>{enemy.name}</strong>
             <span><Heart size={16} /> {enemy.hp}/{enemy.maxHp}</span>
-            <span><Shield size={16} /> {enemy.block}</span>
+            <span><Shield size={16} /> P {enemy.physicalArmor}</span>
+            <span><Zap size={16} /> M {enemy.magicArmor}</span>
             <span><Swords size={16} /> {intentText(enemy)}</span>
             <StatusList statuses={enemy.statuses} />
           </button>
@@ -196,7 +197,8 @@ function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn
       </div>
       <div className="playerStrip">
         <Meter icon={<Heart />} label="HP" value={`${run.player.hp}/${run.player.maxHp}`} tone="blood" />
-        <Meter icon={<Shield />} label="Block" value={run.player.block} />
+        <Meter icon={<Shield />} label="P Armor" value={run.player.physicalArmor} />
+        <Meter icon={<Zap />} label="M Armor" value={run.player.magicArmor} tone="gold" />
         <Meter icon={<Zap />} label="Energy" value={`${run.player.energy}/${run.player.maxEnergy}`} tone="gold" />
         <StatusList statuses={run.player.statuses} />
         <button className="endTurn" onClick={onEndTurn}>End Turn</button>

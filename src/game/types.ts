@@ -5,7 +5,7 @@ export type Screen = "menu" | "map" | "combat" | "reward" | "event" | "shop" | "
 export type EffectTrigger = "runStart" | "combatStart" | "turnStart" | "turnEnd" | "cardPlayed" | "beforeDamageTaken" | "playerDamaged" | "enemyKilled" | "combatWon" | "cardDrawn" | "statusApplied";
 export type RelicTrigger = EffectTrigger;
 export type EffectTarget = "self" | "selectedEnemy" | "player" | "sourceOwner" | "allEnemies" | "randomEnemy" | "allCombatants";
-export type EffectParam = "hp" | "maxHp" | "block" | "energy" | "maxEnergy" | "gold" | "statusAmount" | "upgraded" | "cost" | "cards" | "turn" | "threat" | "movesTaken";
+export type EffectParam = "hp" | "maxHp" | "physicalDamage" | "magicDamage" | "physicalArmor" | "magicArmor" | "energy" | "maxEnergy" | "gold" | "statusAmount" | "upgraded" | "cost" | "cards" | "turn" | "threat" | "movesTaken";
 export type EffectOperation = "add" | "subtract" | "set" | "multiply" | "move" | "create" | "remove" | "clear";
 export type CardZone = "drawPile" | "hand" | "discardPile" | "exhaustPile" | "deck";
 export type CardFilter = "any" | CardType | Rarity | "upgraded" | "notUpgraded";
@@ -61,7 +61,7 @@ export interface CardInstance {
 }
 
 export interface StatusEffect {
-  id: "weak" | "vulnerable" | "frail" | "poison" | "burn" | "bleed" | "strength" | "dexterity" | "thorns" | "regen" | "platedArmor" | "artifact" | "intangible";
+  id: "weak" | "vulnerable" | "frail" | "poison" | "burn" | "bleed" | "strength" | "magic" | "dexterity" | "thorns" | "regen" | "platedArmor" | "artifact" | "intangible";
   amount: number;
 }
 
@@ -118,7 +118,8 @@ export interface EnemyState {
   name: string;
   maxHp: number;
   hp: number;
-  block: number;
+  physicalArmor: number;
+  magicArmor: number;
   statuses: StatusEffect[];
   moveIndex: number;
   intent: EnemyMove;
@@ -127,7 +128,8 @@ export interface EnemyState {
 export interface PlayerState {
   maxHp: number;
   hp: number;
-  block: number;
+  physicalArmor: number;
+  magicArmor: number;
   energy: number;
   maxEnergy: number;
   gold: number;

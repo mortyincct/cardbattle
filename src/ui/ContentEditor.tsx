@@ -232,7 +232,7 @@ function EnemyForm({ pack, id, setPack }: FormProps) {
       </FormSection>
       <FormSection title="Stats" description="Base stats are scaled by threat.">
         <NumberField label="Max HP" value={enemy.maxHp} min={1} onChange={(value) => update({ maxHp: value })} />
-        <NumberField label="Starting block" value={enemy.armor} min={0} onChange={(value) => update({ armor: value })} />
+        <NumberField label="Starting physical armor" value={enemy.armor} min={0} onChange={(value) => update({ armor: value })} />
       </FormSection>
       <MoveList moves={enemy.moves} onChange={(moves) => update({ moves })} />
     </>
@@ -311,7 +311,7 @@ function PassiveList({ passives, onChange }: { passives: TriggeredEffect[]; onCh
           <button className="miniButton removeButton" onClick={() => onChange(passives.filter((_, i) => i !== index))}>Remove passive</button>
         </div>
       ))}
-      <button className="miniButton addNestedButton" onClick={() => onChange([...passives, { trigger: "combatStart", effects: [{ target: "player", param: "block", op: "add", amount: 1 }] }])}>Add passive</button>
+      <button className="miniButton addNestedButton" onClick={() => onChange([...passives, { trigger: "combatStart", effects: [{ target: "player", param: "physicalArmor", op: "add", amount: 1 }] }])}>Add passive</button>
     </fieldset>
   );
 }
@@ -464,7 +464,7 @@ function createDefaultEntry(tab: EditorTab, pack: ContentPack): { pack: ContentP
   }
   if (tab === "relics") {
     const id = uniqueId("new_relic", Object.keys(pack.relics));
-    const relic: RelicDefinition = { id, name: "New Relic", rarity: "common", description: "At the start of each turn, gain 1 block.", trigger: "turnStart", effects: [{ target: "player", param: "block", op: "add", amount: 1 }] };
+    const relic: RelicDefinition = { id, name: "New Relic", rarity: "common", description: "At the start of each turn, gain 1 physical armor.", trigger: "turnStart", effects: [{ target: "player", param: "physicalArmor", op: "add", amount: 1 }] };
     return { pack: updateRelic(pack, id, relic), selected: id };
   }
   const id = uniqueId("new_character", Object.keys(pack.characters));

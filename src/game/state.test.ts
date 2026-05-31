@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { chooseRewardCard, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, SAVE_KEY, SAVE_VERSION, scaleEnemy, startCombat } from "./state";
 import { CONTENT_DRAFT_KEY, defaultContentPack, enemies, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
+import type { Effect, EnemyState, RunState, StatusEffect } from "./types";
 
 beforeEach(() => {
   localStorage.removeItem(CONTENT_DRAFT_KEY);
@@ -40,12 +41,13 @@ describe("map movement", () => {
 
 describe("threat scaling", () => {
   it("scales enemy health and damage from a single function", () => {
-    const base = enemies.find((enemy) => enemy.tier === "normal" && enemy.moves.some((move) => move.effects?.some((effect) => effect.param === "hp" && effect.target === "player")))!;
+    const damageParams = new Set(["physicalDamage", "magicDamage"]);
+    const base = enemies.find((enemy) => enemy.tier === "normal" && enemy.moves.some((move) => move.effects?.some((effect) => damageParams.has(effect.param) && effect.target === "player")))!;
     const scaled = scaleEnemy(base, 8);
     expect(scaled.maxHp).toBeGreaterThan(base.maxHp);
     expect(scaled.moves.some((move, index) => {
-      const scaledDamage = move.effects?.find((effect) => effect.param === "hp" && effect.target === "player")?.amount ?? 0;
-      const baseDamage = base.moves[index].effects?.find((effect) => effect.param === "hp" && effect.target === "player")?.amount ?? 0;
+      const scaledDamage = move.effects?.find((effect) => damageParams.has(effect.param) && effect.target === "player")?.amount ?? 0;
+      const baseDamage = base.moves[index].effects?.find((effect) => damageParams.has(effect.param) && effect.target === "player")?.amount ?? 0;
       return scaledDamage > baseDamage;
     })).toBe(true);
   });
@@ -98,6 +100,7 @@ describe("combat flow", () => {
     run.currentNodeId = boss.id;
     run.threat = 9;
     run.movesTaken = 7;
+    run.player.magicArmor = 5;
     run.combat = makeSingleHpCombat(boss.encounterId ?? "heart");
 
     run = playCard(run, "card-1", "enemy-1");
@@ -109,6 +112,7 @@ describe("combat flow", () => {
     expect(run.player.gold).toBe(originalGold);
     expect(run.threat).toBe(9);
     expect(run.movesTaken).toBe(7);
+    expect(run.player.magicArmor).toBe(0);
     expect(run.map.filter((node) => node.type === "boss")).toHaveLength(3);
   });
 
@@ -143,8 +147,10 @@ describe("combat flow", () => {
         { target: "player", param: "maxEnergy", op: "add", amount: 1 },
         { target: "player", param: "energy", op: "add", amount: 1 },
         { target: "player", param: "gold", op: "add", amount: 5 },
-        { target: "player", param: "block", op: "add", amount: 3 },
+        { target: "player", param: "physicalArmor", op: "add", amount: 3 },
+        { target: "player", param: "magicArmor", op: "add", amount: 2 },
         { target: "player", param: "statusAmount", op: "add", status: "strength", amount: 1 },
+        { target: "player", param: "statusAmount", op: "add", status: "magic", amount: 1 },
         { target: "player", param: "cards", op: "move", amount: 1, fromZone: "drawPile", toZone: "hand" },
         { target: "player", param: "upgraded", op: "set", amount: 1, cardFilter: "notUpgraded" },
         { target: "player", param: "cost", op: "set", amount: 0, cardFilter: "upgraded" },
@@ -157,7 +163,7 @@ describe("combat flow", () => {
     run.contentPack = pack;
     run.screen = "combat";
     run.combat = {
-      enemies: [{ instanceId: "enemy-1", definitionId: "hollow", name: "Test", maxHp: 30, hp: 30, block: 0, statuses: [], moveIndex: 0, intent: { id: "wait", intent: "defend", label: "Wait" } }],
+      enemies: [makeEnemy()],
       drawPile: [{ uid: "drawn-1", cardId: "guard", upgraded: false }],
       hand: [{ uid: "card-1", cardId: "parameter_lab", upgraded: false }],
       discardPile: [],
@@ -175,14 +181,92 @@ describe("combat flow", () => {
     expect(run.player.maxEnergy).toBe(4);
     expect(run.player.energy).toBe(4);
     expect(run.player.gold).toBe(beforeGold + 5);
-    expect(run.player.block).toBe(3);
+    expect(run.player.physicalArmor).toBe(3);
+    expect(run.player.magicArmor).toBe(2);
     expect(run.player.statuses).toContainEqual({ id: "strength", amount: 1 });
+    expect(run.player.statuses).toContainEqual({ id: "magic", amount: 1 });
     expect(run.combat?.hand.some((card) => card.uid === "drawn-1")).toBe(true);
     expect(run.combat?.hand.find((card) => card.uid === "drawn-1")?.upgraded).toBe(true);
     expect(run.combat?.hand.find((card) => card.uid === "drawn-1")?.cost).toBe(0);
     expect(run.threat).toBe(1);
     expect(run.movesTaken).toBe(1);
     expect(run.combat?.turn).toBe(2);
+  });
+});
+
+describe("physical and magic combat", () => {
+  it("uses Strength for physical damage only and Magic for magic damage only", () => {
+    let physicalRun = makeCombatRun("test_physical", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 }], [{ id: "strength", amount: 2 }, { id: "magic", amount: 3 }]);
+    physicalRun = playCard(physicalRun, "card-1", "enemy-1");
+    expect(physicalRun.combat?.enemies[0].hp).toBe(22);
+
+    let magicRun = makeCombatRun("test_magic", [{ target: "selectedEnemy", param: "magicDamage", op: "subtract", amount: 6 }], [{ id: "strength", amount: 2 }, { id: "magic", amount: 3 }]);
+    magicRun = playCard(magicRun, "card-1", "enemy-1");
+    expect(magicRun.combat?.enemies[0].hp).toBe(21);
+  });
+
+  it("uses Dexterity for physical armor only and Magic for magic armor only", () => {
+    let physicalRun = makeCombatRun("test_physical_armor", [{ target: "player", param: "physicalArmor", op: "add", amount: 5 }], [{ id: "dexterity", amount: 2 }, { id: "magic", amount: 3 }]);
+    physicalRun = playCard(physicalRun, "card-1", "enemy-1");
+    expect(physicalRun.player.physicalArmor).toBe(7);
+
+    let magicRun = makeCombatRun("test_magic_armor", [{ target: "player", param: "magicArmor", op: "add", amount: 5 }], [{ id: "dexterity", amount: 2 }, { id: "magic", amount: 3 }]);
+    magicRun = playCard(magicRun, "card-1", "enemy-1");
+    expect(magicRun.player.magicArmor).toBe(8);
+  });
+
+  it("keeps physical and magic armor in separate damage lanes", () => {
+    let physicalBlocked = makeCombatRun("test_physical_blocked", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 }]);
+    physicalBlocked.combat!.enemies[0].physicalArmor = 4;
+    physicalBlocked = playCard(physicalBlocked, "card-1", "enemy-1");
+    expect(physicalBlocked.combat?.enemies[0].hp).toBe(28);
+    expect(physicalBlocked.combat?.enemies[0].physicalArmor).toBe(0);
+
+    let physicalIgnoresMagic = makeCombatRun("test_physical_ignores_magic", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 }]);
+    physicalIgnoresMagic.combat!.enemies[0].magicArmor = 4;
+    physicalIgnoresMagic = playCard(physicalIgnoresMagic, "card-1", "enemy-1");
+    expect(physicalIgnoresMagic.combat?.enemies[0].hp).toBe(24);
+    expect(physicalIgnoresMagic.combat?.enemies[0].magicArmor).toBe(4);
+
+    let magicBlocked = makeCombatRun("test_magic_blocked", [{ target: "selectedEnemy", param: "magicDamage", op: "subtract", amount: 6 }]);
+    magicBlocked.combat!.enemies[0].magicArmor = 4;
+    magicBlocked = playCard(magicBlocked, "card-1", "enemy-1");
+    expect(magicBlocked.combat?.enemies[0].hp).toBe(28);
+    expect(magicBlocked.combat?.enemies[0].magicArmor).toBe(0);
+
+    let magicIgnoresPhysical = makeCombatRun("test_magic_ignores_physical", [{ target: "selectedEnemy", param: "magicDamage", op: "subtract", amount: 6 }]);
+    magicIgnoresPhysical.combat!.enemies[0].physicalArmor = 4;
+    magicIgnoresPhysical = playCard(magicIgnoresPhysical, "card-1", "enemy-1");
+    expect(magicIgnoresPhysical.combat?.enemies[0].hp).toBe(24);
+    expect(magicIgnoresPhysical.combat?.enemies[0].physicalArmor).toBe(4);
+  });
+
+  it("clears physical armor on turn change while magic armor remains", () => {
+    let run = makeCombatRun("test_wait", []);
+    run.player.physicalArmor = 5;
+    run.player.magicArmor = 7;
+    run.combat!.enemies[0].physicalArmor = 6;
+    run.combat!.enemies[0].magicArmor = 8;
+
+    run = endTurn(run);
+
+    expect(run.screen).toBe("combat");
+    expect(run.player.physicalArmor).toBe(0);
+    expect(run.player.magicArmor).toBe(7);
+    expect(run.combat?.enemies[0].physicalArmor).toBe(0);
+    expect(run.combat?.enemies[0].magicArmor).toBe(8);
+  });
+
+  it("treats hp subtract as true HP loss that bypasses armor and damage stats", () => {
+    let run = makeCombatRun("test_true_loss", [{ target: "player", param: "hp", op: "subtract", amount: 3 }], [{ id: "strength", amount: 5 }, { id: "magic", amount: 5 }]);
+    run.player.physicalArmor = 10;
+    run.player.magicArmor = 10;
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.player.hp).toBe(69);
+    expect(run.player.physicalArmor).toBe(10);
+    expect(run.player.magicArmor).toBe(10);
   });
 });
 
@@ -247,10 +331,14 @@ describe("content packs", () => {
   it("migrates legacy effect schemas into parameter operations", () => {
     const legacy = JSON.parse(JSON.stringify(defaultContentPack)) as Partial<typeof defaultContentPack>;
     legacy.cards!.strike.effects = [{ type: "damage", amount: 6 } as never];
+    legacy.cards!.guard.effects = [{ type: "block", amount: 5 } as never];
+    legacy.cards!.dark_pact.effects = [{ target: "player", param: "hp", op: "subtract", amount: 3 } as never];
     legacy.enemies![0].moves[0].effects = [{ type: "applyWeak", amount: 1 } as never];
     legacy.relics!.cracked_core.effects = [{ type: "gainStrength", amount: 1 } as never];
     const migrated = normalizeContentPack(legacy);
-    expect(migrated.cards.strike.effects[0]).toMatchObject({ target: "selectedEnemy", param: "hp", op: "subtract", amount: 6 });
+    expect(migrated.cards.strike.effects[0]).toMatchObject({ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 });
+    expect(migrated.cards.guard.effects[0]).toMatchObject({ target: "player", param: "physicalArmor", op: "add", amount: 5 });
+    expect(migrated.cards.dark_pact.effects[0]).toMatchObject({ target: "player", param: "hp", op: "subtract", amount: 3 });
     expect(migrated.enemies[0]!.moves[0]!.effects![0]).toMatchObject({ target: "player", param: "statusAmount", status: "weak" });
     expect(migrated.relics.cracked_core.effects[0]).toMatchObject({ target: "player", param: "statusAmount", status: "strength" });
     expect(validateContentPack(migrated).valid).toBe(true);
@@ -292,7 +380,7 @@ describe("relics", () => {
     run.screen = "combat";
     run.currentNodeId = run.map.find((node) => node.type !== "boss")?.id ?? "start";
     run.combat = {
-      enemies: [{ instanceId: "enemy-1", definitionId: "hollow", name: "Test", maxHp: 1, hp: 1, block: 0, statuses: [], moveIndex: 0, intent: { id: "wait", intent: "defend", label: "Wait" } }],
+      enemies: [makeEnemy({ maxHp: 1, hp: 1 })],
       drawPile: [],
       hand: [{ uid: "card-1", cardId: "strike", upgraded: false }],
       discardPile: [],
@@ -311,7 +399,7 @@ describe("relics", () => {
 
 function makeSingleHpCombat(definitionId: string) {
   return {
-    enemies: [{ instanceId: "enemy-1", definitionId, name: "Test Boss", maxHp: 1, hp: 1, block: 0, statuses: [], moveIndex: 0, intent: { id: "wait", intent: "defend" as const, label: "Wait" } }],
+    enemies: [makeEnemy({ definitionId, name: "Test Boss", maxHp: 1, hp: 1 })],
     drawPile: [],
     hand: [{ uid: "card-1", cardId: "strike", upgraded: false }],
     discardPile: [],
@@ -319,4 +407,50 @@ function makeSingleHpCombat(definitionId: string) {
     turn: 1,
     log: []
   };
+}
+
+function makeEnemy(overrides: Partial<EnemyState> = {}): EnemyState {
+  return {
+    instanceId: "enemy-1",
+    definitionId: "hollow",
+    name: "Test",
+    maxHp: 30,
+    hp: 30,
+    physicalArmor: 0,
+    magicArmor: 0,
+    statuses: [],
+    moveIndex: 0,
+    intent: { id: "wait", intent: "defend", label: "Wait" },
+    ...overrides
+  };
+}
+
+function makeCombatRun(cardId: string, effects: Effect[], statuses: StatusEffect[] = []): RunState {
+  const run = newRun(101);
+  const pack = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+  pack.cards[cardId] = {
+    id: cardId,
+    name: "Test Card",
+    type: "skill",
+    rarity: "rare",
+    cost: 0,
+    description: "Test card.",
+    upgradedDescription: "Test card.",
+    effects,
+    upgradedEffects: effects
+  };
+  run.contentPack = pack;
+  run.screen = "combat";
+  run.combat = {
+    enemies: [makeEnemy()],
+    drawPile: [],
+    hand: [{ uid: "card-1", cardId, upgraded: false }],
+    discardPile: [],
+    exhaustPile: [],
+    turn: 1,
+    log: []
+  };
+  run.player.statuses = statuses.map((status) => ({ ...status }));
+  run.player.energy = run.player.maxEnergy;
+  return run;
 }

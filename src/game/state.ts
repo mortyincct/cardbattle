@@ -3,7 +3,7 @@ import { mulberry32, pick, shuffle, uid } from "./rng";
 import type { CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 export const MAX_ACT = 3;
 const BOSS_NODE_COUNT = 3;
 
@@ -32,7 +32,7 @@ export function newRun(seed = Date.now()): RunState {
     screen: "map",
     contentPack,
     characterId: character.id,
-    player: { maxHp: character.maxHp, hp: character.maxHp, block: 0, energy: character.maxEnergy, maxEnergy: character.maxEnergy, gold: character.gold, statuses: [] },
+    player: { maxHp: character.maxHp, hp: character.maxHp, physicalArmor: 0, magicArmor: 0, energy: character.maxEnergy, maxEnergy: character.maxEnergy, gold: character.gold, statuses: [] },
     relics: character.starterRelics.filter((id) => contentPack.relics[id]),
     deck,
     map,
@@ -62,12 +62,18 @@ export function loadRun(): RunState | undefined {
 function migrateLegacyRun(run: RunState): RunState {
   const act = run.act ?? 1;
   const pack = normalizeContentPack(run.contentPack ?? loadContentPack());
+  const legacyPlayer = run.player as RunState["player"] & { block?: number; physicalArmor?: number; magicArmor?: number };
   return {
     ...run,
     saveVersion: SAVE_VERSION,
     act,
     contentPack: pack,
     characterId: run.characterId ?? pack.defaultCharacterId,
+    player: {
+      ...run.player,
+      physicalArmor: legacyPlayer.physicalArmor ?? legacyPlayer.block ?? 0,
+      magicArmor: legacyPlayer.magicArmor ?? 0
+    },
     screen: "map",
     currentNodeId: "start",
     combat: undefined,
@@ -207,6 +213,8 @@ export function completeNode(run: RunState): RunState {
 }
 
 export function startCombat(run: RunState, nodeType: NodeType): CombatState {
+  run.player.physicalArmor = 0;
+  run.player.magicArmor = 0;
   const random = mulberry32(run.seed + run.movesTaken * 97);
   const tier = nodeType === "boss" ? "boss" : nodeType === "elite" ? "elite" : "normal";
   const node = run.map.find((item) => item.id === run.currentNodeId);
@@ -241,7 +249,7 @@ export function scaleEnemy(enemy: EnemyDefinition, threat: number): EnemyDefinit
 
 function toEnemyState(enemy: EnemyDefinition, threat: number): EnemyState {
   const scaled = scaleEnemy(enemy, threat);
-  return { instanceId: uid("enemy"), definitionId: enemy.id, name: scaled.name, maxHp: scaled.maxHp, hp: scaled.maxHp, block: scaled.armor, statuses: [], moveIndex: 0, intent: scaled.moves[0] };
+  return { instanceId: uid("enemy"), definitionId: enemy.id, name: scaled.name, maxHp: scaled.maxHp, hp: scaled.maxHp, physicalArmor: scaled.armor, magicArmor: 0, statuses: [], moveIndex: 0, intent: scaled.moves[0] };
 }
 
 export function playCard(run: RunState, cardUid: string, targetEnemyId?: string): RunState {
@@ -275,8 +283,8 @@ export function endTurn(run: RunState): RunState {
   const combat = next.combat!;
   combat.discardPile.push(...combat.hand);
   combat.hand = [];
-  next.player.block = 0;
   combat.enemies.forEach((enemy) => {
+    enemy.physicalArmor = 0;
     triggerPoison(enemy);
     if (enemy.hp <= 0) return;
     resolveEnemyMove(next, enemy, enemy.intent);
@@ -294,8 +302,8 @@ export function endTurn(run: RunState): RunState {
     const def = scaleEnemy(getContentPack(next).enemies.find((item) => item.id === enemy.definitionId) ?? enemies.find((item) => item.id === enemy.definitionId)!, next.threat);
     enemy.moveIndex = (enemy.moveIndex + 1) % def.moves.length;
     enemy.intent = def.moves[enemy.moveIndex];
-    enemy.block = 0;
   });
+  next.player.physicalArmor = 0;
   next.player.energy = next.player.maxEnergy;
   combat.turn += 1;
   drawCards(combat, 5, Math.random);
@@ -306,14 +314,14 @@ export function endTurn(run: RunState): RunState {
 
 function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove) {
   const hasParamEffects = Boolean(move.effects?.length);
-  if (!hasParamEffects && move.block) enemy.block += move.block;
+  if (!hasParamEffects && move.block) enemy.physicalArmor += move.block;
   const hits = move.hits ?? 1;
   for (let i = 0; i < hits; i += 1) {
     if (hasParamEffects || !move.damage) continue;
     let amount = move.damage + getStatus(enemy.statuses, "strength");
     if (getStatus(enemy.statuses, "weak") > 0) amount = Math.floor(amount * 0.75);
     if (getStatus(run.player.statuses, "vulnerable") > 0) amount = Math.floor(amount * 1.5);
-    damagePlayer(run, amount, enemy);
+    damagePlayer(run, amount, enemy, "physical");
   }
   resolveEffects(run, move.effects ?? [], { source: "enemy", sourceOwner: enemy });
   run.combat!.log.unshift(`${enemy.name}: ${move.label}.`);
@@ -325,8 +333,9 @@ function winCombat(run: RunState): RunState {
   if (node?.type === "boss") {
     return run.act < MAX_ACT ? advanceAct(run) : winRun(run);
   }
-  run.player.block = 0;
-  run.player.statuses = run.player.statuses.filter((status) => status.id === "strength" || status.id === "thorns");
+  run.player.physicalArmor = 0;
+  run.player.magicArmor = 0;
+  run.player.statuses = run.player.statuses.filter((status) => ["strength", "magic", "dexterity", "thorns"].includes(status.id));
   run.combat = undefined;
   run.pendingReward = { type: "card", cards: makeRewardCards(run, 3), amount: 18 + run.threat * 2 };
   run.player.gold += run.pendingReward.amount ?? 0;
@@ -337,8 +346,9 @@ function winCombat(run: RunState): RunState {
 
 function advanceAct(run: RunState): RunState {
   run.act += 1;
-  run.player.block = 0;
-  run.player.statuses = run.player.statuses.filter((status) => status.id === "strength" || status.id === "thorns");
+  run.player.physicalArmor = 0;
+  run.player.magicArmor = 0;
+  run.player.statuses = run.player.statuses.filter((status) => ["strength", "magic", "dexterity", "thorns"].includes(status.id));
   run.combat = undefined;
   run.pendingReward = undefined;
   run.activeEvent = undefined;
@@ -454,22 +464,26 @@ function drawCards(combat: CombatState, amount: number, random: () => number) {
   }
 }
 
-function damageEnemy(enemy: EnemyState, amount: number) {
-  const blocked = Math.min(enemy.block, amount);
-  enemy.block -= blocked;
+type DamageKind = "physical" | "magic" | "true";
+
+function damageEnemy(enemy: EnemyState, amount: number, kind: DamageKind = "true") {
+  const armorKey = kind === "magic" ? "magicArmor" : "physicalArmor";
+  const blocked = kind === "true" ? 0 : Math.min(enemy[armorKey], amount);
+  if (kind !== "true") enemy[armorKey] -= blocked;
   enemy.hp -= amount - blocked;
 }
 
-function damagePlayer(run: RunState, amount: number, source?: EnemyState) {
+function damagePlayer(run: RunState, amount: number, source?: EnemyState, kind: DamageKind = "true") {
   const poison = getStatus(run.player.statuses, "poison");
   if (poison > 0) run.player.hp -= poison;
   applyTriggeredEffects(run, "beforeDamageTaken", { source: "enemy", sourceOwner: source, selectedEnemy: source });
-  const blocked = Math.min(run.player.block, amount);
-  run.player.block -= blocked;
+  const armorKey = kind === "magic" ? "magicArmor" : "physicalArmor";
+  const blocked = kind === "true" ? 0 : Math.min(run.player[armorKey], amount);
+  if (kind !== "true") run.player[armorKey] -= blocked;
   run.player.hp -= amount - blocked;
   if (source && amount > 0) {
     const thorns = getStatus(run.player.statuses, "thorns");
-    if (thorns > 0) damageEnemy(source, thorns);
+    if (thorns > 0) damageEnemy(source, thorns, "true");
   }
   if (amount > 0) applyTriggeredEffects(run, "playerDamaged", { source: "enemy", sourceOwner: source, selectedEnemy: source });
 }
@@ -575,7 +589,7 @@ function applyParamOperation(run: RunState, effect: Effect, context: ResolveCont
   targets.forEach((target) => {
     if (effect.param === "statusAmount" && effect.status && isCombatant(target)) {
       applyStatusOperation(target.statuses, effect.status, effect.op, effect.amount ?? 0);
-    } else if (isCombatant(target) && ["hp", "maxHp", "block", "energy", "maxEnergy", "gold"].includes(effect.param)) {
+    } else if (isCombatant(target) && ["hp", "maxHp", "physicalDamage", "magicDamage", "physicalArmor", "magicArmor", "energy", "maxEnergy", "gold"].includes(effect.param)) {
       applyCombatantParam(run, target, effect, context);
     } else {
       applyRunParam(run, effect);
@@ -600,11 +614,17 @@ function resolveTargets(run: RunState, target: EffectTarget, context: ResolveCon
 
 function applyCombatantParam(run: RunState, target: EffectOwner, effect: Effect, context: ResolveContext) {
   const amount = effect.amount ?? 0;
-  if (effect.param === "hp" && effect.op === "subtract") {
+  if ((effect.param === "physicalDamage" || effect.param === "magicDamage") && effect.op === "subtract") {
     const source = context.sourceOwner && isCombatant(context.sourceOwner) ? context.sourceOwner : undefined;
-    const adjusted = adjustDamage(amount, source, target);
-    if (isEnemy(target)) damageEnemy(target, adjusted);
-    else damagePlayer(run, adjusted, source && isEnemy(source) ? source : undefined);
+    const kind = effect.param === "magicDamage" ? "magic" : "physical";
+    const adjusted = adjustDamage(amount, source, target, kind);
+    if (isEnemy(target)) damageEnemy(target, adjusted, kind);
+    else damagePlayer(run, adjusted, source && isEnemy(source) ? source : undefined, kind);
+    return;
+  }
+  if (effect.param === "hp" && effect.op === "subtract") {
+    if (isEnemy(target)) damageEnemy(target, amount, "true");
+    else damagePlayer(run, amount, context.sourceOwner && isEnemy(context.sourceOwner) ? context.sourceOwner : undefined, "true");
     return;
   }
   if (effect.param === "hp") {
@@ -617,9 +637,9 @@ function applyCombatantParam(run: RunState, target: EffectOwner, effect: Effect,
     target.hp = clamp(target.hp + Math.max(0, target.maxHp - before), 1, target.maxHp);
     return;
   }
-  if (effect.param === "block") {
-    const blockAmount = context.source === "card" ? modifyBlockGain(amount, target) : amount;
-    target.block = Math.max(0, applyNumberOp(target.block, effect.op, blockAmount));
+  if (effect.param === "physicalArmor" || effect.param === "magicArmor") {
+    const armorAmount = context.source === "card" ? modifyArmorGain(amount, target, effect.param === "magicArmor" ? "magic" : "physical") : amount;
+    target[effect.param] = Math.max(0, applyNumberOp(target[effect.param], effect.op, armorAmount));
     return;
   }
   if (!isEnemy(target) && effect.param === "energy") target.energy = Math.max(0, applyNumberOp(target.energy, effect.op, amount));
@@ -741,22 +761,22 @@ function getParamValue(run: RunState, target: EffectOwner | undefined, param: Ef
   return typeof target[param as keyof EffectOwner] === "number" ? (target[param as keyof EffectOwner] as number) : 0;
 }
 
-function adjustDamage(amount: number, source: EffectOwner | undefined, target: EffectOwner) {
-  let next = amount + (source ? getStatus(source.statuses, "strength") : 0);
+function adjustDamage(amount: number, source: EffectOwner | undefined, target: EffectOwner, kind: Exclude<DamageKind, "true">) {
+  let next = amount + (source ? getStatus(source.statuses, kind === "magic" ? "magic" : "strength") : 0);
   if (source && getStatus(source.statuses, "weak") > 0) next = Math.floor(next * 0.75);
   if (getStatus(target.statuses, "vulnerable") > 0) next = Math.floor(next * 1.5);
   if (getStatus(target.statuses, "intangible") > 0) next = Math.min(next, 1);
   return Math.max(0, next);
 }
 
-function modifyBlockGain(amount: number, target: EffectOwner) {
-  let next = amount + getStatus(target.statuses, "dexterity");
+function modifyArmorGain(amount: number, target: EffectOwner, kind: Exclude<DamageKind, "true">) {
+  let next = amount + getStatus(target.statuses, kind === "magic" ? "magic" : "dexterity");
   if (getStatus(target.statuses, "frail") > 0) next = Math.floor(next * 0.75);
   return Math.max(0, next);
 }
 
 function isCombatant(value: EffectOwner | RunState): value is EffectOwner {
-  return "statuses" in value && "hp" in value && "block" in value;
+  return "statuses" in value && "hp" in value && "physicalArmor" in value && "magicArmor" in value;
 }
 
 function isEnemy(value: EffectOwner): value is EnemyState {
@@ -764,7 +784,8 @@ function isEnemy(value: EffectOwner): value is EnemyState {
 }
 
 function scaleEnemyEffect(effect: Effect, damageScale: number, threat: number): Effect {
-  if (effect.param === "hp" && effect.op === "subtract" && effect.target === "player" && effect.amount) return { ...effect, amount: Math.max(1, Math.round(effect.amount * damageScale)) };
-  if (effect.param === "block" && effect.target === "self" && effect.amount) return { ...effect, amount: effect.amount + Math.floor(threat / 3) };
+  if ((effect.param === "physicalDamage" || effect.param === "magicDamage") && effect.op === "subtract" && effect.target === "player" && effect.amount) return { ...effect, amount: Math.max(1, Math.round(effect.amount * damageScale)) };
+  if ((effect.param === "physicalArmor" || effect.param === "magicArmor") && effect.target === "self" && effect.amount) return { ...effect, amount: effect.amount + Math.floor(threat / 3) };
   return effect;
 }
+
