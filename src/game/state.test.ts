@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { chooseRewardCard, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, SAVE_KEY, SAVE_VERSION, scaleEnemy, startCombat } from "./state";
-import { CONTENT_DRAFT_KEY, defaultContentPack, enemies, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
-import type { Effect, EnemyState, RunState, StatusEffect } from "./types";
+import { applyEventChoice, buyFromShop, chooseRewardCard, claimTreasure, clearSave, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, restAtCampfire, saveRun, SAVE_KEY, SAVE_VERSION, scaleEnemy, shopService, startCombat } from "./state";
+import { clearContentDraft, CONTENT_DRAFT_KEY, defaultContentPack, enemies, loadContentPack, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
+import type { Effect, EnemyState, EventChoice, RunState, StatusEffect } from "./types";
 
 beforeEach(() => {
   localStorage.removeItem(CONTENT_DRAFT_KEY);
@@ -36,6 +36,33 @@ describe("map movement", () => {
     expect(bossNodes.some((node) => node.x >= 90)).toBe(true);
     innerRing.forEach((node) => expect(start.neighbors).toContain(node.id));
     bossNodes.forEach((boss) => expect(outerRing.some((node) => node.neighbors.includes(boss.id))).toBe(true));
+  });
+
+  it("does not move to invisible, non-neighbor, or non-map targets", () => {
+    const run = newRun(42);
+    const invisible = run.map.find((node) => !node.visible)!;
+    const blocked = moveToNode(run, invisible.id);
+    expect(blocked).toBe(run);
+
+    const next = { ...run, screen: "reward" as const };
+    const start = next.map.find((node) => node.id === "start")!;
+    const notMap = moveToNode(next, start.neighbors[0]);
+    expect(notMap).toBe(next);
+  });
+
+  it("passes through completed nodes without starting a new encounter", () => {
+    const run = newRun(42);
+    const start = run.map.find((node) => node.id === "start")!;
+    const target = run.map.find((node) => node.id === start.neighbors[0])!;
+    target.completed = true;
+    target.visible = true;
+
+    const moved = moveToNode(run, target.id);
+
+    expect(moved.currentNodeId).toBe(target.id);
+    expect(moved.screen).toBe("map");
+    expect(moved.combat).toBeUndefined();
+    expect(moved.pendingReward).toBeUndefined();
   });
 });
 
@@ -78,6 +105,17 @@ describe("combat flow", () => {
     expect(run.saveVersion).toBe(SAVE_VERSION);
   });
 
+  it("draws the same next hand for the same seed and combat state", () => {
+    const first = makeShuffleRun();
+    const second = makeShuffleRun();
+
+    const firstNext = endTurn(first);
+    const secondNext = endTurn(second);
+
+    expect(firstNext.combat?.hand.map((card) => card.uid)).toEqual(secondNext.combat?.hand.map((card) => card.uid));
+    expect(firstNext.rngCounter).toBe(secondNext.rngCounter);
+  });
+
   it("uses the boss encounter bound to the selected map node", () => {
     let run = newRun(33);
     const boss = run.map.find((node) => node.type === "boss")!;
@@ -113,6 +151,7 @@ describe("combat flow", () => {
     expect(run.threat).toBe(9);
     expect(run.movesTaken).toBe(7);
     expect(run.player.magicArmor).toBe(0);
+    expect(run.pendingReward).toBeUndefined();
     expect(run.map.filter((node) => node.type === "boss")).toHaveLength(3);
   });
 
@@ -169,7 +208,8 @@ describe("combat flow", () => {
       discardPile: [],
       exhaustPile: [],
       turn: 1,
-      log: []
+      log: [],
+      oncePerCombatKeys: []
     };
     run.player.hp = 60;
     const beforeGold = run.player.gold;
@@ -191,6 +231,30 @@ describe("combat flow", () => {
     expect(run.threat).toBe(1);
     expect(run.movesTaken).toBe(1);
     expect(run.combat?.turn).toBe(2);
+  });
+
+  it("chooses the same random enemy target for the same seed and action", () => {
+    const effects: Effect[] = [{ target: "randomEnemy", param: "hp", op: "subtract", amount: 3 }];
+    const first = makeCombatRun("test_random_enemy", effects);
+    const second = makeCombatRun("test_random_enemy", effects);
+    first.combat!.enemies = [makeEnemy({ instanceId: "enemy-1", hp: 30 }), makeEnemy({ instanceId: "enemy-2", hp: 30 })];
+    second.combat!.enemies = [makeEnemy({ instanceId: "enemy-1", hp: 30 }), makeEnemy({ instanceId: "enemy-2", hp: 30 })];
+
+    const firstNext = playCard(first, "card-1");
+    const secondNext = playCard(second, "card-1");
+
+    expect(firstNext.combat?.enemies.map((enemy) => enemy.hp)).toEqual(secondNext.combat?.enemies.map((enemy) => enemy.hp));
+  });
+
+  it("records combat log entries and keeps the log capped", () => {
+    const effects: Effect[] = Array.from({ length: 45 }, () => ({ target: "player", param: "statusAmount", op: "add", status: "strength", amount: 1 }));
+    const run = makeCombatRun("test_log_flood", effects);
+
+    const next = playCard(run, "card-1", "enemy-1");
+
+    expect(next.combat?.log.length).toBeLessThanOrEqual(40);
+    expect(next.combat?.log[0]).toContain("打出");
+    expect(next.combat?.log.some((line) => line.includes("力量"))).toBe(true);
   });
 });
 
@@ -270,7 +334,187 @@ describe("physical and magic combat", () => {
   });
 });
 
+describe("core rule details", () => {
+  it("resolves poison and regen at the player's turn start", () => {
+    let run = makeCombatRun("test_wait", []);
+    run.player.hp = 50;
+    run.player.statuses = [{ id: "poison", amount: 3 }, { id: "regen", amount: 2 }];
+    run.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+
+    run = endTurn(run);
+
+    expect(run.player.hp).toBe(49);
+    expect(run.player.statuses).toContainEqual({ id: "poison", amount: 2 });
+    expect(run.player.statuses).toContainEqual({ id: "regen", amount: 1 });
+  });
+
+  it("resolves burn and intangible at the owner's turn end", () => {
+    let run = makeCombatRun("test_wait", []);
+    run.player.hp = 50;
+    run.player.statuses = [{ id: "burn", amount: 4 }, { id: "intangible", amount: 1 }];
+    run.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+
+    run = endTurn(run);
+
+    expect(run.player.hp).toBe(46);
+    expect(run.player.statuses).toContainEqual({ id: "burn", amount: 3 });
+    expect(run.player.statuses.some((status) => status.id === "intangible")).toBe(false);
+  });
+
+  it("uses bleed only after unblocked physical damage", () => {
+    let physicalRun = makeCombatRun("test_bleed_physical", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 }]);
+    physicalRun.combat!.enemies[0].statuses = [{ id: "bleed", amount: 2 }];
+    physicalRun = playCard(physicalRun, "card-1", "enemy-1");
+    expect(physicalRun.combat?.enemies[0].hp).toBe(22);
+    expect(physicalRun.combat?.enemies[0].statuses).toContainEqual({ id: "bleed", amount: 1 });
+
+    let magicRun = makeCombatRun("test_bleed_magic", [{ target: "selectedEnemy", param: "magicDamage", op: "subtract", amount: 6 }]);
+    magicRun.combat!.enemies[0].statuses = [{ id: "bleed", amount: 2 }];
+    magicRun = playCard(magicRun, "card-1", "enemy-1");
+    expect(magicRun.combat?.enemies[0].hp).toBe(24);
+    expect(magicRun.combat?.enemies[0].statuses).toContainEqual({ id: "bleed", amount: 2 });
+  });
+
+  it("applies plated armor at turn start and reduces it after HP damage", () => {
+    let run = makeCombatRun("test_plated_hit", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 6 }]);
+    run.combat!.enemies[0].statuses = [{ id: "platedArmor", amount: 2 }];
+    run = playCard(run, "card-1", "enemy-1");
+    expect(run.combat?.enemies[0].statuses).toContainEqual({ id: "platedArmor", amount: 1 });
+
+    let turnRun = makeCombatRun("test_wait", []);
+    turnRun.combat!.enemies[0].statuses = [{ id: "platedArmor", amount: 3 }];
+    turnRun.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+    turnRun = endTurn(turnRun);
+    expect(turnRun.combat?.enemies[0].physicalArmor).toBe(3);
+  });
+
+  it("caps damage with intangible", () => {
+    let run = makeCombatRun("test_intangible_damage", [{ target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 12 }]);
+    run.combat!.enemies[0].statuses = [{ id: "intangible", amount: 1 }];
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.combat?.enemies[0].hp).toBe(29);
+  });
+
+  it("lets artifact block negative statuses without firing statusApplied", () => {
+    let run = makeCombatRun("test_artifact", [{ target: "player", param: "statusAmount", op: "add", status: "weak", amount: 2 }]);
+    const pack = run.contentPack!;
+    pack.characters[pack.defaultCharacterId].passives = [{ trigger: "statusApplied", effects: [{ target: "player", param: "gold", op: "add", amount: 5 }] }];
+    run.player.statuses = [{ id: "artifact", amount: 1 }];
+    const gold = run.player.gold;
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.player.statuses.some((status) => status.id === "weak")).toBe(false);
+    expect(run.player.statuses.some((status) => status.id === "artifact")).toBe(false);
+    expect(run.player.gold).toBe(gold);
+  });
+
+  it("exhausts ethereal cards and discards unplayable status and curse cards at turn end", () => {
+    let run = makeCombatRun("test_wait", []);
+    const pack = run.contentPack!;
+    pack.cards.ghost = { ...pack.cards.guard, id: "ghost", name: "Ghost", ethereal: true };
+    run.combat!.hand = [
+      { uid: "ghost-1", cardId: "ghost", upgraded: false },
+      { uid: "wound-1", cardId: "wound", upgraded: false },
+      { uid: "curse-1", cardId: "curse", upgraded: false }
+    ];
+    run.combat!.drawPile = [
+      { uid: "draw-1", cardId: "strike", upgraded: false },
+      { uid: "draw-2", cardId: "strike", upgraded: false },
+      { uid: "draw-3", cardId: "strike", upgraded: false },
+      { uid: "draw-4", cardId: "strike", upgraded: false },
+      { uid: "draw-5", cardId: "strike", upgraded: false }
+    ];
+    run.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+
+    run = endTurn(run);
+
+    expect(run.combat?.exhaustPile.some((card) => card.uid === "ghost-1")).toBe(true);
+    expect(run.combat?.discardPile.some((card) => card.uid === "wound-1")).toBe(true);
+    expect(run.combat?.discardPile.some((card) => card.uid === "curse-1")).toBe(true);
+  });
+
+  it("fires turnEnd, cardDrawn, enemyKilled, and statusApplied triggers", () => {
+    let run = makeCombatRun("trigger_lab", [
+      { target: "selectedEnemy", param: "physicalDamage", op: "subtract", amount: 3 },
+      { target: "player", param: "statusAmount", op: "add", status: "strength", amount: 1 },
+      { target: "player", param: "cards", op: "move", amount: 1, fromZone: "drawPile", toZone: "hand" }
+    ]);
+    const pack = run.contentPack!;
+    pack.characters[pack.defaultCharacterId].passives = [
+      { trigger: "turnEnd", effects: [{ target: "player", param: "gold", op: "add", amount: 2 }] },
+      { trigger: "cardDrawn", effects: [{ target: "player", param: "gold", op: "add", amount: 3 }] },
+      { trigger: "enemyKilled", effects: [{ target: "player", param: "gold", op: "add", amount: 5 }] },
+      { trigger: "statusApplied", effects: [{ target: "player", param: "gold", op: "add", amount: 7 }] }
+    ];
+    run.combat!.drawPile = [{ uid: "draw-1", cardId: "guard", upgraded: false }];
+    run.combat!.enemies = [makeEnemy({ hp: 3 }), makeEnemy({ instanceId: "enemy-2", hp: 30 })];
+    const gold = run.player.gold;
+
+    run = playCard(run, "card-1", "enemy-1");
+    expect(run.player.gold).toBe(gold + 15);
+
+    run.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+    run.contentPack!.characters[run.contentPack!.defaultCharacterId].passives = [{ trigger: "turnEnd", effects: [{ target: "player", param: "gold", op: "add", amount: 2 }] }];
+    run = endTurn(run);
+    expect(run.player.gold).toBe(gold + 17);
+  });
+
+  it("runs oncePerCombat passives only once per combat", () => {
+    let run = makeCombatRun("once_lab", []);
+    const pack = run.contentPack!;
+    pack.characters[pack.defaultCharacterId].passives = [{ trigger: "cardPlayed", oncePerCombat: true, effects: [{ target: "player", param: "gold", op: "add", amount: 1 }] }];
+    run.combat!.hand = [
+      { uid: "card-1", cardId: "once_lab", upgraded: false },
+      { uid: "card-2", cardId: "once_lab", upgraded: false }
+    ];
+    const gold = run.player.gold;
+
+    run = playCard(run, "card-1", "enemy-1");
+    run = playCard(run, "card-2", "enemy-1");
+
+    expect(run.player.gold).toBe(gold + 1);
+    expect(run.combat?.oncePerCombatKeys).toHaveLength(1);
+  });
+});
+
 describe("saves", () => {
+  it("returns undefined when no save exists", () => {
+    expect(loadRun()).toBeUndefined();
+  });
+
+  it("round-trips saves with content, rng, and combat trigger state", () => {
+    const run = makeCombatRun("test_wait", []);
+    run.contentPack!.cards.strike.name = "Saved Strike";
+    run.rngCounter = 11;
+    run.combat!.oncePerCombatKeys = ["character:wanderer:cardPlayed:0"];
+
+    saveRun(run);
+    const loaded = loadRun();
+
+    expect(loaded?.contentPack?.cards.strike.name).toBe("Saved Strike");
+    expect(loaded?.rngCounter).toBe(11);
+    expect(loaded?.combat?.oncePerCombatKeys).toEqual(["character:wanderer:cardPlayed:0"]);
+  });
+
+  it("returns undefined for unknown or damaged save data", () => {
+    const run = newRun(3);
+    localStorage.setItem(SAVE_KEY, JSON.stringify({ ...run, saveVersion: 999 }));
+    expect(loadRun()).toBeUndefined();
+
+    localStorage.setItem(SAVE_KEY, "{bad json");
+    expect(loadRun()).toBeUndefined();
+  });
+
+  it("clears saved runs", () => {
+    saveRun(newRun(4));
+    expect(loadRun()).toBeTruthy();
+    clearSave();
+    expect(loadRun()).toBeUndefined();
+  });
+
   it("migrates v1 saves to the current act-aware shape", () => {
     const legacy = newRun(51);
     const raw = JSON.parse(JSON.stringify(legacy));
@@ -282,6 +526,19 @@ describe("saves", () => {
 
     expect(loaded?.saveVersion).toBe(SAVE_VERSION);
     expect(loaded?.act).toBe(1);
+    expect(loaded?.rngCounter).toBe(0);
+  });
+
+  it("adds once-per-combat tracking to current saves with older combat objects", () => {
+    const run = makeCombatRun("test_wait", []);
+    const raw = JSON.parse(JSON.stringify(run));
+    delete raw.combat.oncePerCombatKeys;
+    localStorage.setItem(SAVE_KEY, JSON.stringify(raw));
+
+    const loaded = loadRun();
+
+    expect(loaded?.saveVersion).toBe(SAVE_VERSION);
+    expect(loaded?.combat?.oncePerCombatKeys).toEqual([]);
   });
 });
 
@@ -294,11 +551,147 @@ describe("rewards", () => {
     expect(next.deck.some((card) => card.uid === "reward-1")).toBe(true);
     expect(next.screen).toBe("map");
   });
+
+  it("skips card rewards without changing the deck", () => {
+    const run = newRun(5);
+    run.screen = "reward";
+    run.pendingReward = { type: "card", amount: 10, cards: [{ uid: "reward-1", cardId: "quick_cut", upgraded: false }] };
+    const deckSize = run.deck.length;
+
+    const next = chooseRewardCard(run);
+
+    expect(next.deck).toHaveLength(deckSize);
+    expect(next.screen).toBe("map");
+    expect(next.pendingReward).toBeUndefined();
+  });
+});
+
+describe("events, campfires, shops, and treasure", () => {
+  it("applies gain-gold-lose-HP event choices and completes the node", () => {
+    const run = makeEventRun("gainGoldLoseHp");
+    const hp = run.player.hp;
+    const gold = run.player.gold;
+
+    const next = applyEventChoice(run, "choice");
+
+    expect(next.player.gold).toBe(gold + 45);
+    expect(next.player.hp).toBe(hp - 8);
+    expect(next.screen).toBe("map");
+    expect(next.activeEvent).toBeUndefined();
+    expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
+
+  it("applies heal-curse event choices with max HP cap", () => {
+    const run = makeEventRun("healGainCurse");
+    run.player.hp = run.player.maxHp - 5;
+
+    const next = applyEventChoice(run, "choice");
+
+    expect(next.player.hp).toBe(next.player.maxHp);
+    expect(next.deck.some((card) => card.cardId === "curse")).toBe(true);
+    expect(next.screen).toBe("map");
+  });
+
+  it("applies upgrade and skip event choices", () => {
+    const upgradeRun = makeEventRun("upgradeRandom");
+    const upgraded = applyEventChoice(upgradeRun, "choice");
+    expect(upgraded.deck.some((card) => card.upgraded)).toBe(true);
+    expect(upgraded.screen).toBe("map");
+
+    const skipRun = makeEventRun("skip");
+    const before = JSON.stringify(skipRun.deck);
+    const skipped = applyEventChoice(skipRun, "choice");
+    expect(JSON.stringify(skipped.deck)).toBe(before);
+    expect(skipped.screen).toBe("map");
+  });
+
+  it("rests at campfire with HP cap and upgrades one card", () => {
+    const healRun = makeScreenRun("campfire");
+    healRun.player.hp = healRun.player.maxHp - 5;
+    const healed = restAtCampfire(healRun, "heal");
+    expect(healed.player.hp).toBe(healed.player.maxHp);
+    expect(healed.screen).toBe("map");
+    expect(healed.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+
+    const upgradeRun = makeScreenRun("campfire");
+    const upgraded = restAtCampfire(upgradeRun, "upgrade");
+    expect(upgraded.deck.some((card) => card.upgraded)).toBe(true);
+  });
+
+  it("buys cards and rejects unaffordable shop cards", () => {
+    const run = makeShopRun();
+    const offer = run.shopOffer![0];
+    const gold = run.player.gold;
+
+    const bought = buyFromShop(run, offer.uid);
+    expect(bought.player.gold).toBe(gold - 55);
+    expect(bought.deck.some((card) => card.uid === offer.uid)).toBe(true);
+    expect(bought.shopOffer?.some((card) => card.uid === offer.uid)).toBe(false);
+
+    const poor = makeShopRun();
+    poor.player.gold = 0;
+    const rejected = buyFromShop(poor, poor.shopOffer![0].uid);
+    expect(rejected).toBe(poor);
+  });
+
+  it("uses shop services for healing, removing, and leaving", () => {
+    const healRun = makeShopRun();
+    healRun.player.hp = 40;
+    const healed = shopService(healRun, "heal");
+    expect(healed.player.hp).toBe(58);
+    expect(healed.player.gold).toBe(healRun.player.gold - 35);
+    expect(healed.screen).toBe("shop");
+
+    const removeRun = makeShopRun();
+    const deckSize = removeRun.deck.length;
+    const removed = shopService(removeRun, "remove");
+    expect(removed.deck).toHaveLength(deckSize - 1);
+    expect(removed.player.gold).toBe(removeRun.player.gold - 75);
+
+    const left = shopService(makeShopRun(), "leave");
+    expect(left.screen).toBe("map");
+    expect(left.shopOffer).toBeUndefined();
+  });
+
+  it("claims treasure and completes the node", () => {
+    const run = makeScreenRun("treasure");
+    run.pendingReward = { type: "gold", amount: 77 };
+    const gold = run.player.gold;
+
+    const next = claimTreasure(run);
+
+    expect(next.player.gold).toBe(gold + 77);
+    expect(next.screen).toBe("map");
+    expect(next.pendingReward).toBeUndefined();
+    expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
 });
 
 describe("content packs", () => {
   it("accepts the default content pack", () => {
     expect(validateContentPack(defaultContentPack).valid).toBe(true);
+  });
+
+  it("loads default content without a draft and falls back from invalid draft data", () => {
+    expect(loadContentPack().cards.strike.name).toBe(defaultContentPack.cards.strike.name);
+
+    localStorage.setItem(CONTENT_DRAFT_KEY, "{bad json");
+    expect(loadContentPack().cards.strike.name).toBe(defaultContentPack.cards.strike.name);
+
+    const invalid = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    invalid.defaultCharacterId = "missing";
+    localStorage.setItem(CONTENT_DRAFT_KEY, JSON.stringify(invalid));
+    expect(loadContentPack().defaultCharacterId).toBe(defaultContentPack.defaultCharacterId);
+  });
+
+  it("loads valid content drafts and clears them", () => {
+    const draft = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    draft.cards.strike.name = "Loaded Draft Strike";
+    saveContentDraft(draft);
+    expect(loadContentPack().cards.strike.name).toBe("Loaded Draft Strike");
+
+    clearContentDraft();
+    expect(loadContentPack().cards.strike.name).toBe(defaultContentPack.cards.strike.name);
   });
 
   it("rejects invalid ids, invalid effects, empty moves, and bad numbers", () => {
@@ -316,6 +709,22 @@ describe("content packs", () => {
     const result = validateContentPack(invalid as unknown as typeof defaultContentPack);
     expect(result.valid).toBe(false);
     expect(result.errors.length).toBeGreaterThan(3);
+  });
+
+  it("rejects duplicated enemy ids, invalid default characters, and missing references", () => {
+    const invalid = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+    invalid.enemies.push({ ...invalid.enemies[0] });
+    invalid.defaultCharacterId = "missing_character";
+    invalid.characters.wanderer.starterDeck.push("missing_card");
+    invalid.characters.wanderer.starterRelics.push("missing_relic");
+
+    const result = validateContentPack(invalid);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(`Enemy ${invalid.enemies[0].id} id is duplicated.`);
+    expect(result.errors).toContain("Default character must reference a valid character.");
+    expect(result.errors).toContain("Character wanderer starter deck references missing card missing_card.");
+    expect(result.errors).toContain("Character wanderer starter relics reference missing relic missing_relic.");
   });
 
   it("rejects missing parameterized effect fields", () => {
@@ -386,7 +795,8 @@ describe("relics", () => {
       discardPile: [],
       exhaustPile: [],
       turn: 1,
-      log: []
+      log: [],
+      oncePerCombatKeys: []
     };
     run.player.hp = 50;
     const gold = run.player.gold;
@@ -405,7 +815,8 @@ function makeSingleHpCombat(definitionId: string) {
     discardPile: [],
     exhaustPile: [],
     turn: 1,
-    log: []
+    log: [],
+    oncePerCombatKeys: []
   };
 }
 
@@ -423,6 +834,57 @@ function makeEnemy(overrides: Partial<EnemyState> = {}): EnemyState {
     intent: { id: "wait", intent: "defend", label: "Wait" },
     ...overrides
   };
+}
+
+function makeScreenRun(screen: RunState["screen"]): RunState {
+  const run = newRun(202);
+  run.screen = screen;
+  run.currentNodeId = "current-node";
+  run.map = [
+    { id: "start", type: "start", x: 50, y: 50, neighbors: ["current-node"], completed: true, visible: true },
+    { id: "current-node", type: screen === "treasure" ? "treasure" : screen === "shop" ? "shop" : screen === "campfire" ? "campfire" : "event", x: 60, y: 50, neighbors: ["start"], completed: false, visible: true }
+  ];
+  return run;
+}
+
+function makeEventRun(effect: EventChoice["effect"]): RunState {
+  const run = makeScreenRun("event");
+  run.activeEvent = {
+    id: "test-event",
+    title: "Test Event",
+    body: "Test body.",
+    choices: [{ id: "choice", label: "Choice", description: "Choice result.", effect }]
+  };
+  return run;
+}
+
+function makeShopRun(): RunState {
+  const run = makeScreenRun("shop");
+  run.player.gold = 120;
+  run.shopOffer = [
+    { uid: "shop-1", cardId: "quick_cut", upgraded: false },
+    { uid: "shop-2", cardId: "arcane_bolt", upgraded: false }
+  ];
+  return run;
+}
+
+function makeShuffleRun(): RunState {
+  const run = makeCombatRun("test_wait", []);
+  run.seed = 2026;
+  run.act = 1;
+  run.movesTaken = 4;
+  run.rngCounter = 0;
+  run.combat!.drawPile = [];
+  run.combat!.hand = [];
+  run.combat!.discardPile = [
+    { uid: "shuffle-1", cardId: "strike", upgraded: false },
+    { uid: "shuffle-2", cardId: "guard", upgraded: false },
+    { uid: "shuffle-3", cardId: "spark", upgraded: false },
+    { uid: "shuffle-4", cardId: "ward", upgraded: false },
+    { uid: "shuffle-5", cardId: "quick_cut", upgraded: false }
+  ];
+  run.combat!.enemies = [makeEnemy({ intent: { id: "wait", intent: "defend", label: "Wait", effects: [] } })];
+  return run;
 }
 
 function makeCombatRun(cardId: string, effects: Effect[], statuses: StatusEffect[] = []): RunState {
@@ -448,7 +910,8 @@ function makeCombatRun(cardId: string, effects: Effect[], statuses: StatusEffect
     discardPile: [],
     exhaustPile: [],
     turn: 1,
-    log: []
+    log: [],
+    oncePerCombatKeys: []
   };
   run.player.statuses = statuses.map((status) => ({ ...status }));
   run.player.energy = run.player.maxEnergy;

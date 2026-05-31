@@ -3,7 +3,7 @@ import { mulberry32, pick, shuffle, uid } from "./rng";
 import type { CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 export const MAX_ACT = 3;
 const BOSS_NODE_COUNT = 3;
 
@@ -39,7 +39,8 @@ export function newRun(seed = Date.now()): RunState {
     currentNodeId: "start",
     threat: 0,
     movesTaken: 0,
-    message: "The net opens. Choose a neighboring node.",
+    rngCounter: 0,
+    message: "织网展开。选择一个相邻节点。",
     victory: false
   };
   applyTriggeredEffects(run, "runStart", { source: "character", sourceOwner: run.player });
@@ -53,10 +54,32 @@ export function saveRun(run: RunState) {
 export function loadRun(): RunState | undefined {
   const raw = localStorage.getItem(SAVE_KEY);
   if (!raw) return undefined;
-  const parsed = JSON.parse(raw) as RunState;
-  if (parsed.saveVersion === SAVE_VERSION) return { ...parsed, contentPack: parsed.contentPack ? normalizeContentPack(parsed.contentPack) : undefined };
-  if (parsed.saveVersion >= 1 && parsed.saveVersion < SAVE_VERSION) return migrateLegacyRun(parsed);
-  return undefined;
+  try {
+    const parsed = JSON.parse(raw) as RunState;
+    if (parsed.saveVersion === SAVE_VERSION) return normalizeLoadedRun(parsed);
+    if (parsed.saveVersion >= 1 && parsed.saveVersion < SAVE_VERSION) return migrateLegacyRun(parsed);
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeLoadedRun(run: RunState): RunState {
+  return {
+    ...run,
+    rngCounter: run.rngCounter ?? 0,
+    contentPack: run.contentPack ? normalizeContentPack(run.contentPack) : undefined,
+    combat: run.combat ? normalizeCombat(run.combat) : undefined
+  };
+}
+
+function normalizeCombat(combat: CombatState): CombatState {
+  return { ...combat, oncePerCombatKeys: combat.oncePerCombatKeys ?? [] };
+}
+
+function ensureCombatShape(combat: CombatState): CombatState {
+  combat.oncePerCombatKeys ??= [];
+  return combat;
 }
 
 function migrateLegacyRun(run: RunState): RunState {
@@ -81,7 +104,8 @@ function migrateLegacyRun(run: RunState): RunState {
     activeEvent: undefined,
     shopOffer: undefined,
     map: generateMap(mulberry32(run.seed + act * 1009), act, pack),
-    message: `Act ${act} begins. Choose a new path.`
+    rngCounter: run.rngCounter ?? 0,
+    message: `第 ${act} 幕开始。选择新的路线。`
   };
 }
 
@@ -169,13 +193,13 @@ export function moveToNode(run: RunState, nodeId: string): RunState {
   next.threat += 1;
   revealNeighbors(next, nodeId);
   if (node.completed) {
-    next.message = "You pass through a quiet, already-cleared place.";
+    next.message = "你穿过一处已经清理过的安静地点。";
     return next;
   }
   if (node.type === "combat" || node.type === "elite" || node.type === "boss") {
     next.combat = startCombat(next, node.type);
     next.screen = "combat";
-    next.message = `A ${node.type === "boss" ? "boss" : node.type} fight begins.`;
+    next.message = `${nodeTypeLabel(node.type)}战斗开始。`;
   } else if (node.type === "event") {
     next.activeEvent = pick(events, mulberry32(next.seed + next.movesTaken));
     next.screen = "event";
@@ -224,9 +248,9 @@ export function startCombat(run: RunState, nodeType: NodeType): CombatState {
   const count = tier === "normal" && random() > 0.45 ? 2 : 1;
   const enemyStates = Array.from({ length: count }, () => toEnemyState(pick(candidates, random), run.threat));
   const drawPile = shuffle(run.deck.map((card) => ({ ...card })), random);
-  const combat: CombatState = { enemies: enemyStates, drawPile, hand: [], discardPile: [], exhaustPile: [], turn: 1, log: ["Draw your opening hand."] };
-  drawCards(combat, 5, random);
+  const combat: CombatState = { enemies: enemyStates, drawPile, hand: [], discardPile: [], exhaustPile: [], turn: 1, log: ["抽取起始手牌。"], oncePerCombatKeys: [] };
   const next = { ...run, combat };
+  drawCards(next, combat, 5, random);
   applyTriggeredEffects(next, "combatStart", { source: "character", sourceOwner: next.player, random });
   return combat;
 }
@@ -255,7 +279,7 @@ function toEnemyState(enemy: EnemyDefinition, threat: number): EnemyState {
 export function playCard(run: RunState, cardUid: string, targetEnemyId?: string): RunState {
   if (!run.combat || run.screen !== "combat") return run;
   const next = clone(run);
-  const combat = next.combat!;
+  const combat = ensureCombatShape(next.combat!);
   const index = combat.hand.findIndex((card) => card.uid === cardUid);
   if (index < 0) return run;
   const card = combat.hand[index];
@@ -266,13 +290,14 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
   next.player.energy -= cost;
   combat.hand.splice(index, 1);
   const effects = card.upgraded ? def.upgradedEffects : def.effects;
-  resolveEffects(next, effects, { source: "card", sourceOwner: next.player, selectedEnemy: target, card });
-  applyTriggeredEffects(next, "cardPlayed", { source: "card", sourceOwner: next.player, selectedEnemy: target, card });
+  const random = consumeRunRandom(next, 3000 + combat.turn);
+  resolveEffects(next, effects, { source: "card", sourceOwner: next.player, selectedEnemy: target, card, random });
+  applyTriggeredEffects(next, "cardPlayed", { source: "card", sourceOwner: next.player, selectedEnemy: target, card, random });
   if (def.id === "harvest" && target && target.hp <= 0) next.player.gold += card.upgraded ? 12 : 8;
-  combat.enemies = combat.enemies.filter((enemy) => enemy.hp > 0);
+  removeDeadEnemies(next);
   if (def.exhaust || def.type === "power") combat.exhaustPile.push(card);
   else combat.discardPile.push(card);
-  combat.log.unshift(`Played ${def.name}.`);
+  pushCombatLog(next, `打出 ${def.name}${card.upgraded ? "+" : ""}。`);
   if (combat.enemies.length === 0) return winCombat(next);
   return next;
 }
@@ -280,25 +305,29 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
 export function endTurn(run: RunState): RunState {
   if (!run.combat || run.screen !== "combat") return run;
   const next = clone(run);
-  const combat = next.combat!;
-  combat.discardPile.push(...combat.hand);
-  combat.hand = [];
+  const combat = ensureCombatShape(next.combat!);
+  applyTriggeredEffects(next, "turnEnd", { source: "character", sourceOwner: next.player, random: consumeRunRandom(next, 7100 + combat.turn) });
+  applyTurnEndStatuses(next, next.player);
+  discardHandAtTurnEnd(next);
+  const enemyRandom = consumeRunRandom(next, 4000 + combat.turn);
   combat.enemies.forEach((enemy) => {
     enemy.physicalArmor = 0;
-    triggerPoison(enemy);
+    applyTurnStartStatuses(next, enemy);
+    removeDeadEnemies(next);
     if (enemy.hp <= 0) return;
-    resolveEnemyMove(next, enemy, enemy.intent);
+    resolveEnemyMove(next, enemy, enemy.intent, enemyRandom);
+    applyTurnEndStatuses(next, enemy);
+    removeDeadEnemies(next);
   });
-  combat.enemies = combat.enemies.filter((enemy) => enemy.hp > 0);
   if (next.player.hp <= 0) {
     next.screen = "gameover";
-    next.message = "The net closes. You died.";
+    next.message = "织网收拢。你倒下了。";
     return next;
   }
   if (combat.enemies.length === 0) return winCombat(next);
-  tickStatuses(next.player.statuses);
+  tickDurationStatuses(next.player.statuses);
   combat.enemies.forEach((enemy) => {
-    tickStatuses(enemy.statuses);
+    tickDurationStatuses(enemy.statuses);
     const def = scaleEnemy(getContentPack(next).enemies.find((item) => item.id === enemy.definitionId) ?? enemies.find((item) => item.id === enemy.definitionId)!, next.threat);
     enemy.moveIndex = (enemy.moveIndex + 1) % def.moves.length;
     enemy.intent = def.moves[enemy.moveIndex];
@@ -306,13 +335,19 @@ export function endTurn(run: RunState): RunState {
   next.player.physicalArmor = 0;
   next.player.energy = next.player.maxEnergy;
   combat.turn += 1;
-  drawCards(combat, 5, Math.random);
+  applyTurnStartStatuses(next, next.player);
+  if (next.player.hp <= 0) {
+    next.screen = "gameover";
+    next.message = "织网收拢。你倒下了。";
+    return next;
+  }
+  drawCards(next, combat, 5, consumeRunRandom(next, 2000 + combat.turn));
   applyTriggeredEffects(next, "turnStart", { source: "character", sourceOwner: next.player });
-  combat.log.unshift(`Turn ${combat.turn} begins.`);
+  pushCombatLog(next, `第 ${combat.turn} 回合开始。`);
   return next;
 }
 
-function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove) {
+function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove, random?: () => number) {
   const hasParamEffects = Boolean(move.effects?.length);
   if (!hasParamEffects && move.block) enemy.physicalArmor += move.block;
   const hits = move.hits ?? 1;
@@ -323,8 +358,8 @@ function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove) {
     if (getStatus(run.player.statuses, "vulnerable") > 0) amount = Math.floor(amount * 1.5);
     damagePlayer(run, amount, enemy, "physical");
   }
-  resolveEffects(run, move.effects ?? [], { source: "enemy", sourceOwner: enemy });
-  run.combat!.log.unshift(`${enemy.name}: ${move.label}.`);
+  resolveEffects(run, move.effects ?? [], { source: "enemy", sourceOwner: enemy, random });
+  pushCombatLog(run, `${enemy.name} 使用 ${move.label}。`);
 }
 
 function winCombat(run: RunState): RunState {
@@ -340,7 +375,7 @@ function winCombat(run: RunState): RunState {
   run.pendingReward = { type: "card", cards: makeRewardCards(run, 3), amount: 18 + run.threat * 2 };
   run.player.gold += run.pendingReward.amount ?? 0;
   run.screen = "reward";
-  run.message = "Victory. Choose a card reward.";
+  run.message = "战斗胜利。选择一张卡牌奖励。";
   return run;
 }
 
@@ -356,14 +391,14 @@ function advanceAct(run: RunState): RunState {
   run.screen = "map";
   run.currentNodeId = "start";
   run.map = generateMap(mulberry32(run.seed + run.act * 1009), run.act, getContentPack(run));
-  run.message = `Act ${run.act} begins. Choose a new path.`;
+  run.message = `第 ${run.act} 幕开始。选择新的路线。`;
   return run;
 }
 
 function winRun(run: RunState): RunState {
   run.screen = "gameover";
   run.victory = true;
-  run.message = `The Act ${MAX_ACT} boss falls. The Rootless Paths open.`;
+  run.message = `第 ${MAX_ACT} 幕首领倒下。无根之路重新打开。`;
   clearSave();
   return run;
 }
@@ -373,7 +408,7 @@ export function chooseRewardCard(run: RunState, cardUid?: string): RunState {
   const next = clone(run);
   const chosen = cardUid ? next.pendingReward!.cards?.find((card) => card.uid === cardUid) : undefined;
   if (chosen) next.deck.push(chosen);
-  next.message = chosen ? `${cardDef(chosen).name} joins the deck.` : "You skip the card reward.";
+  next.message = chosen ? `${cardDef(chosen).name} 加入牌组。` : "你跳过了卡牌奖励。";
   return completeNode(next);
 }
 
@@ -382,7 +417,7 @@ export function claimTreasure(run: RunState): RunState {
   const next = clone(run);
   const amount = next.pendingReward?.amount ?? 0;
   next.player.gold += amount;
-  next.message = `Found ${amount} gold.`;
+  next.message = `获得 ${amount} 金币。`;
   return completeNode(next);
 }
 
@@ -408,10 +443,10 @@ export function restAtCampfire(run: RunState, action: "heal" | "upgrade"): RunSt
   const next = clone(run);
   if (action === "heal") {
     next.player.hp = Math.min(next.player.maxHp, next.player.hp + 22);
-    next.message = "You rest under cold sparks.";
+    next.message = "你在冷火旁休息，恢复了生命。";
   } else {
     upgradeRandom(next);
-    next.message = "A card sharpens in the firelight.";
+    next.message = "一张卡牌在火光中变得更锋利。";
   }
   return completeNode(next);
 }
@@ -424,7 +459,7 @@ export function buyFromShop(run: RunState, cardUid: string): RunState {
   next.player.gold -= 55;
   next.deck.push(card);
   next.shopOffer = next.shopOffer!.filter((item) => item.uid !== cardUid);
-  next.message = `${cardDef(card).name} purchased.`;
+  next.message = `购买了 ${cardDef(card).name}。`;
   return next;
 }
 
@@ -434,14 +469,14 @@ export function shopService(run: RunState, action: "heal" | "remove" | "leave"):
   if (action === "heal" && next.player.gold >= 35) {
     next.player.gold -= 35;
     next.player.hp = Math.min(next.player.maxHp, next.player.hp + 18);
-    next.message = "A bitter tonic closes old cuts.";
+    next.message = "苦涩药剂让旧伤合拢。";
     return next;
   }
   if (action === "remove" && next.player.gold >= 75 && next.deck.length > 6) {
     next.player.gold -= 75;
     const removable = next.deck.find((card) => card.cardId === "strike") ?? next.deck.find((card) => card.cardId === "guard") ?? next.deck[0];
     next.deck = next.deck.filter((card) => card.uid !== removable.uid);
-    next.message = `${cardDef(removable).name} removed.`;
+    next.message = `移除了 ${cardDef(removable).name}。`;
     return next;
   }
   return completeNode(next);
@@ -453,57 +488,136 @@ function makeRewardCards(run: RunState, amount: number): CardInstance[] {
   return Array.from({ length: amount }, () => makeCard(pick(rewardCardPool, random).id, random() > 0.88));
 }
 
-function drawCards(combat: CombatState, amount: number, random: () => number) {
+function drawCards(run: RunState, combat: CombatState, amount: number, random: () => number) {
   for (let i = 0; i < amount; i += 1) {
     if (combat.drawPile.length === 0) {
       combat.drawPile = shuffle(combat.discardPile, random);
       combat.discardPile = [];
     }
     const drawn = combat.drawPile.shift();
-    if (drawn) combat.hand.push(drawn);
+    if (drawn) {
+      combat.hand.push(drawn);
+      applyTriggeredEffects(run, "cardDrawn", { source: "card", sourceOwner: run.player, card: drawn, random });
+    }
   }
 }
 
 type DamageKind = "physical" | "magic" | "true";
 
-function damageEnemy(enemy: EnemyState, amount: number, kind: DamageKind = "true") {
+function damageEnemy(run: RunState, enemy: EnemyState, amount: number, kind: DamageKind = "true") {
   const armorKey = kind === "magic" ? "magicArmor" : "physicalArmor";
   const blocked = kind === "true" ? 0 : Math.min(enemy[armorKey], amount);
   if (kind !== "true") enemy[armorKey] -= blocked;
-  enemy.hp -= amount - blocked;
+  const loss = amount - blocked;
+  enemy.hp -= loss;
+  if (loss > 0 || blocked > 0) pushCombatLog(run, `${enemy.name} 受到 ${loss} 点${damageKindLabel(kind)}伤害${blocked > 0 ? `，${blocked} 点被护甲抵消` : ""}。`);
+  afterDamage(run, enemy, loss, kind);
+  return loss;
 }
 
 function damagePlayer(run: RunState, amount: number, source?: EnemyState, kind: DamageKind = "true") {
-  const poison = getStatus(run.player.statuses, "poison");
-  if (poison > 0) run.player.hp -= poison;
   applyTriggeredEffects(run, "beforeDamageTaken", { source: "enemy", sourceOwner: source, selectedEnemy: source });
   const armorKey = kind === "magic" ? "magicArmor" : "physicalArmor";
   const blocked = kind === "true" ? 0 : Math.min(run.player[armorKey], amount);
   if (kind !== "true") run.player[armorKey] -= blocked;
-  run.player.hp -= amount - blocked;
+  const loss = amount - blocked;
+  run.player.hp -= loss;
+  if (loss > 0 || blocked > 0) pushCombatLog(run, `你受到 ${loss} 点${damageKindLabel(kind)}伤害${blocked > 0 ? `，${blocked} 点被护甲抵消` : ""}。`);
+  afterDamage(run, run.player, loss, kind);
   if (source && amount > 0) {
     const thorns = getStatus(run.player.statuses, "thorns");
-    if (thorns > 0) damageEnemy(source, thorns, "true");
+    if (thorns > 0) damageEnemy(run, source, thorns, "true");
   }
   if (amount > 0) applyTriggeredEffects(run, "playerDamaged", { source: "enemy", sourceOwner: source, selectedEnemy: source });
+  return loss;
 }
 
-function triggerPoison(enemy: EnemyState) {
-  const poison = getStatus(enemy.statuses, "poison");
+function tickDurationStatuses(statuses: StatusEffect[]) {
+  statuses.forEach((status) => {
+    if (status.id === "weak" || status.id === "vulnerable" || status.id === "frail") status.amount -= 1;
+  });
+  pruneStatuses(statuses);
+}
+
+function applyTurnStartStatuses(run: RunState, target: EffectOwner) {
+  const poison = getStatus(target.statuses, "poison");
   if (poison > 0) {
-    enemy.hp -= poison;
-    const status = enemy.statuses.find((item) => item.id === "poison");
-    if (status) status.amount = Math.max(0, status.amount - 1);
+    loseHpFromStatus(run, target, poison, "中毒");
+    decrementStatus(target.statuses, "poison");
+  }
+  const regen = getStatus(target.statuses, "regen");
+  if (regen > 0) {
+    const before = target.hp;
+    target.hp = Math.min(target.maxHp, target.hp + regen);
+    pushCombatLog(run, `${combatantName(target)} 再生恢复 ${target.hp - before} 点生命。`);
+    decrementStatus(target.statuses, "regen");
+  }
+  const platedArmor = getStatus(target.statuses, "platedArmor");
+  if (platedArmor > 0) {
+    target.physicalArmor += platedArmor;
+    pushCombatLog(run, `${combatantName(target)} 的多层护甲提供 ${platedArmor} 点物理护甲。`);
   }
 }
 
-function tickStatuses(statuses: StatusEffect[]) {
-  statuses.forEach((status) => {
-    if (status.id === "weak" || status.id === "vulnerable") status.amount -= 1;
-  });
+function applyTurnEndStatuses(run: RunState, target: EffectOwner) {
+  const burn = getStatus(target.statuses, "burn");
+  if (burn > 0) {
+    loseHpFromStatus(run, target, burn, "燃烧");
+    decrementStatus(target.statuses, "burn");
+  }
+  if (getStatus(target.statuses, "intangible") > 0) decrementStatus(target.statuses, "intangible");
+}
+
+function afterDamage(run: RunState, target: EffectOwner, hpLoss: number, kind: DamageKind) {
+  if (hpLoss <= 0) return;
+  if (getStatus(target.statuses, "platedArmor") > 0) decrementStatus(target.statuses, "platedArmor");
+  if (kind === "physical" && getStatus(target.statuses, "bleed") > 0) {
+    const bleed = getStatus(target.statuses, "bleed");
+    loseHpFromStatus(run, target, bleed, "流血");
+    decrementStatus(target.statuses, "bleed");
+  }
+}
+
+function loseHpFromStatus(run: RunState, target: EffectOwner, amount: number, label: string) {
+  target.hp -= amount;
+  pushCombatLog(run, `${combatantName(target)} 因${label}失去 ${amount} 点生命。`);
+}
+
+function decrementStatus(statuses: StatusEffect[], id: StatusEffect["id"], amount = 1) {
+  const status = statuses.find((item) => item.id === id);
+  if (status) status.amount -= amount;
+  pruneStatuses(statuses);
+}
+
+function pruneStatuses(statuses: StatusEffect[]) {
   for (let i = statuses.length - 1; i >= 0; i -= 1) {
     if (statuses[i].amount <= 0) statuses.splice(i, 1);
   }
+}
+
+function discardHandAtTurnEnd(run: RunState) {
+  const combat = run.combat!;
+  const hand = combat.hand;
+  combat.hand = [];
+  hand.forEach((card) => {
+    const def = cardDefFrom(card, getContentPack(run));
+    if (def.ethereal) {
+      combat.exhaustPile.push(card);
+      pushCombatLog(run, `${def.name} 因虚无进入消耗堆。`);
+    } else {
+      combat.discardPile.push(card);
+    }
+  });
+}
+
+function removeDeadEnemies(run: RunState) {
+  if (!run.combat) return;
+  const dead = run.combat.enemies.filter((enemy) => enemy.hp <= 0);
+  dead.forEach((enemy) => {
+    applyTriggeredEffects(run, "enemyKilled", { source: "status", sourceOwner: run.player, selectedEnemy: enemy });
+    pushCombatLog(run, `${enemy.name} 被击倒。`);
+  });
+  run.combat.enemies = run.combat.enemies.filter((enemy) => enemy.hp > 0);
 }
 
 function addStatus(statuses: StatusEffect[], id: StatusEffect["id"], amount: number) {
@@ -534,7 +648,63 @@ function clone<T>(value: T): T {
 }
 
 export function eventTitle(event?: GameEvent) {
-  return event?.title ?? "Strange Silence";
+  return event?.title ?? "诡异寂静";
+}
+
+function consumeRunRandom(run: RunState, salt: number) {
+  const counter = run.rngCounter ?? 0;
+  run.rngCounter = counter + 1;
+  return mulberry32(run.seed + run.act * 1000003 + run.movesTaken * 1009 + counter * 9176 + salt);
+}
+
+function pushCombatLog(run: RunState, message: string) {
+  if (!run.combat) return;
+  run.combat.log.unshift(message);
+  if (run.combat.log.length > 40) run.combat.log.splice(40);
+}
+
+function damageKindLabel(kind: DamageKind) {
+  if (kind === "physical") return "物理";
+  if (kind === "magic") return "魔法";
+  return "真实";
+}
+
+function combatantName(target: EffectOwner) {
+  return isEnemy(target) ? target.name : "你";
+}
+
+function statusLabel(id: StatusEffect["id"]) {
+  const labels: Record<StatusEffect["id"], string> = {
+    weak: "虚弱",
+    vulnerable: "易伤",
+    frail: "脆弱",
+    poison: "中毒",
+    burn: "燃烧",
+    bleed: "流血",
+    strength: "力量",
+    magic: "魔力",
+    dexterity: "敏捷",
+    thorns: "荆棘",
+    regen: "再生",
+    platedArmor: "多层护甲",
+    artifact: "人工制品",
+    intangible: "无形"
+  };
+  return labels[id];
+}
+
+function nodeTypeLabel(type: NodeType) {
+  const labels: Record<NodeType, string> = {
+    start: "起点",
+    combat: "普通",
+    elite: "精英",
+    event: "事件",
+    campfire: "营火",
+    shop: "商店",
+    treasure: "宝箱",
+    boss: "首领"
+  };
+  return labels[type];
 }
 
 function getContentPack(run: RunState): ContentPack {
@@ -559,11 +729,17 @@ function applyTriggeredEffects(run: RunState, trigger: RelicTrigger, context: Re
     const relic = pack.relics[id];
     if (!relic || relic.trigger !== trigger) return;
     resolveEffects(run, relic.effects, { ...context, source: "relic", sourceOwner: run.player });
-    run.combat?.log.unshift(`${relic.name} triggered.`);
+    pushCombatLog(run, `${relic.name} 触发。`);
   });
   const character = pack.characters[run.characterId ?? pack.defaultCharacterId];
-  character?.passives.forEach((passive) => {
+  character?.passives.forEach((passive, index) => {
     if (passive.trigger !== trigger || !conditionMet(run, passive.condition, context)) return;
+    const onceKey = `character:${character.id}:${trigger}:${index}`;
+    if (passive.oncePerCombat && run.combat) {
+      ensureCombatShape(run.combat);
+      if (run.combat.oncePerCombatKeys.includes(onceKey)) return;
+      run.combat.oncePerCombatKeys.push(onceKey);
+    }
     resolveEffects(run, passive.effects, { ...context, source: "character", sourceOwner: run.player });
   });
 }
@@ -588,7 +764,11 @@ function applyParamOperation(run: RunState, effect: Effect, context: ResolveCont
   const targets = resolveTargets(run, effect.target, context);
   targets.forEach((target) => {
     if (effect.param === "statusAmount" && effect.status && isCombatant(target)) {
-      applyStatusOperation(target.statuses, effect.status, effect.op, effect.amount ?? 0);
+      const before = getStatus(target.statuses, effect.status);
+      const applied = applyStatusOperation(run, target, effect.status, effect.op, effect.amount ?? 0, context);
+      const after = getStatus(target.statuses, effect.status);
+      if (after !== before) pushCombatLog(run, `${combatantName(target)} 的 ${statusLabel(effect.status)} ${before} -> ${after}。`);
+      if (applied && after > before) applyTriggeredEffects(run, "statusApplied", { ...context, source: "status", sourceOwner: target, selectedEnemy: isEnemy(target) ? target : context.selectedEnemy });
     } else if (isCombatant(target) && ["hp", "maxHp", "physicalDamage", "magicDamage", "physicalArmor", "magicArmor", "energy", "maxEnergy", "gold"].includes(effect.param)) {
       applyCombatantParam(run, target, effect, context);
     } else {
@@ -605,7 +785,7 @@ function resolveTargets(run: RunState, target: EffectTarget, context: ResolveCon
   if (target === "allEnemies") return combat?.enemies ?? [];
   if (target === "randomEnemy") {
     if (!combat?.enemies.length) return [];
-    const random = context.random ?? Math.random;
+    const random = context.random ?? consumeRunRandom(run, 5000 + (combat.turn ?? 0));
     return [combat.enemies[Math.floor(random() * combat.enemies.length)]];
   }
   if (target === "allCombatants") return combat ? [run.player, ...combat.enemies] : [run.player];
@@ -618,12 +798,12 @@ function applyCombatantParam(run: RunState, target: EffectOwner, effect: Effect,
     const source = context.sourceOwner && isCombatant(context.sourceOwner) ? context.sourceOwner : undefined;
     const kind = effect.param === "magicDamage" ? "magic" : "physical";
     const adjusted = adjustDamage(amount, source, target, kind);
-    if (isEnemy(target)) damageEnemy(target, adjusted, kind);
+    if (isEnemy(target)) damageEnemy(run, target, adjusted, kind);
     else damagePlayer(run, adjusted, source && isEnemy(source) ? source : undefined, kind);
     return;
   }
   if (effect.param === "hp" && effect.op === "subtract") {
-    if (isEnemy(target)) damageEnemy(target, amount, "true");
+    if (isEnemy(target)) damageEnemy(run, target, amount, "true");
     else damagePlayer(run, amount, context.sourceOwner && isEnemy(context.sourceOwner) ? context.sourceOwner : undefined, "true");
     return;
   }
@@ -639,7 +819,9 @@ function applyCombatantParam(run: RunState, target: EffectOwner, effect: Effect,
   }
   if (effect.param === "physicalArmor" || effect.param === "magicArmor") {
     const armorAmount = context.source === "card" ? modifyArmorGain(amount, target, effect.param === "magicArmor" ? "magic" : "physical") : amount;
+    const before = target[effect.param];
     target[effect.param] = Math.max(0, applyNumberOp(target[effect.param], effect.op, armorAmount));
+    if (target[effect.param] !== before) pushCombatLog(run, `${combatantName(target)} 的 ${effect.param === "magicArmor" ? "魔法护甲" : "物理护甲"} ${before} -> ${target[effect.param]}。`);
     return;
   }
   if (!isEnemy(target) && effect.param === "energy") target.energy = Math.max(0, applyNumberOp(target.energy, effect.op, amount));
@@ -659,7 +841,7 @@ function applyCardOperation(run: RunState, effect: Effect, context: ResolveConte
   const amount = effect.amount ?? 1;
   if (effect.op === "move" && effect.fromZone && effect.toZone) {
     if (effect.fromZone === "drawPile" && effect.toZone === "hand" && run.combat) {
-      drawCards(run.combat, amount, context.random ?? Math.random);
+      drawCards(run, run.combat, amount, context.random ?? consumeRunRandom(run, 6000 + run.combat.turn));
       return;
     }
     moveCards(run, effect.fromZone, effect.toZone, amount, effect.cardFilter ?? "any");
@@ -713,20 +895,37 @@ function cardMatches(run: RunState, card: CardInstance, filter: CardFilter) {
   return def.type === filter || def.rarity === filter;
 }
 
-function applyStatusOperation(statuses: StatusEffect[], id: StatusEffect["id"], op: Effect["op"], amount: number) {
+function applyStatusOperation(run: RunState, target: EffectOwner, id: StatusEffect["id"], op: Effect["op"], amount: number, context: ResolveContext) {
+  const statuses = target.statuses;
   if (op === "clear") {
     const index = statuses.findIndex((status) => status.id === id);
     if (index >= 0) statuses.splice(index, 1);
-    return;
+    return false;
   }
   const current = getStatus(statuses, id);
   const next = Math.max(0, applyNumberOp(current, op, amount));
+  if (shouldArtifactBlockStatus(target, id, op, current, next)) {
+    decrementStatus(target.statuses, "artifact");
+    pushCombatLog(run, `${combatantName(target)} 的人工制品抵消了 ${statusLabel(id)}。`);
+    return false;
+  }
   const existing = statuses.find((status) => status.id === id);
   if (existing) existing.amount = next;
   else if (next > 0) statuses.push({ id, amount: next });
-  for (let i = statuses.length - 1; i >= 0; i -= 1) {
-    if (statuses[i].amount <= 0) statuses.splice(i, 1);
-  }
+  pruneStatuses(statuses);
+  return next > current && context.source !== "status";
+}
+
+function shouldArtifactBlockStatus(target: EffectOwner, id: StatusEffect["id"], op: Effect["op"], current: number, next: number) {
+  if (!isNegativeStatus(id) || getStatus(target.statuses, "artifact") <= 0) return false;
+  if (op === "add") return next > current;
+  if (op === "set") return next > current;
+  if (op === "multiply") return next > current;
+  return false;
+}
+
+function isNegativeStatus(id: StatusEffect["id"]) {
+  return id === "weak" || id === "vulnerable" || id === "frail" || id === "poison" || id === "burn" || id === "bleed";
 }
 
 function applyNumberOp(current: number, op: Effect["op"], amount: number) {

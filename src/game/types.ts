@@ -155,6 +155,7 @@ export interface CombatState {
   exhaustPile: CardInstance[];
   turn: number;
   log: string[];
+  oncePerCombatKeys: string[];
 }
 
 export interface Reward {
@@ -191,6 +192,7 @@ export interface RunState {
   currentNodeId: string;
   threat: number;
   movesTaken: number;
+  rngCounter: number;
   combat?: CombatState;
   pendingReward?: Reward;
   activeEvent?: GameEvent;

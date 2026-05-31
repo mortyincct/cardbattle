@@ -59,9 +59,9 @@ export const enemies: EnemyDefinition[] = [
 ];
 
 export const events: GameEvent[] = [
-  { id: "altar", title: "Altar of Quiet Teeth", body: "Coins glimmer in the mouth of a stone saint. It asks for warmth.", choices: [{ id: "take", label: "Take the coins", description: "Gain 45 gold. Lose 8 HP.", effect: "gainGoldLoseHp" }, { id: "pray", label: "Offer a card", description: "Upgrade a random card.", effect: "upgradeRandom" }, { id: "leave", label: "Leave", description: "Move on.", effect: "skip" }] },
-  { id: "pool", title: "Moonless Pool", body: "Black water reflects a healthier version of you, smiling too widely.", choices: [{ id: "drink", label: "Drink", description: "Heal 18. Add a curse.", effect: "healGainCurse" }, { id: "study", label: "Study the reflection", description: "Upgrade a random card.", effect: "upgradeRandom" }, { id: "leave", label: "Leave", description: "Move on.", effect: "skip" }] },
-  { id: "caravan", title: "Lost Caravan", body: "The wagons are abandoned, but the locks have fresh scratches.", choices: [{ id: "loot", label: "Loot fast", description: "Gain 45 gold. Lose 8 HP.", effect: "gainGoldLoseHp" }, { id: "repair", label: "Repair your gear", description: "Upgrade a random card.", effect: "upgradeRandom" }, { id: "leave", label: "Leave", description: "Move on.", effect: "skip" }] }
+  { id: "altar", title: "静齿祭坛", body: "金币在石圣的口中闪光。它索要一点温度。", choices: [{ id: "take", label: "取走金币", description: "获得 45 金币，失去 8 点生命。", effect: "gainGoldLoseHp" }, { id: "pray", label: "献上一张牌", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] },
+  { id: "pool", title: "无月之池", body: "黑水映出一个更健康的你，笑得过分灿烂。", choices: [{ id: "drink", label: "饮下池水", description: "恢复 18 点生命，加入一张诅咒。", effect: "healGainCurse" }, { id: "study", label: "凝视倒影", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] },
+  { id: "caravan", title: "失落商队", body: "车队早已废弃，但锁上还有新鲜抓痕。", choices: [{ id: "loot", label: "快速搜刮", description: "获得 45 金币，失去 8 点生命。", effect: "gainGoldLoseHp" }, { id: "repair", label: "修整装备", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] }
 ];
 
 export const relics: Record<string, RelicDefinition> = {

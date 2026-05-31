@@ -249,6 +249,11 @@ h2 {
   transform: translateY(-1px);
 }
 
+.nodeGlyph svg {
+  width: 20px;
+  height: 20px;
+}
+
 .node.hidden {
   opacity: 0;
   pointer-events: none;
@@ -672,10 +677,36 @@ h2 {
   background: #765139;
 }
 
+.combatMain {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 12px;
+  align-items: start;
+}
+
 .hand {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
+}
+
+.combatLog {
+  display: grid;
+  gap: 8px;
+  min-height: 182px;
+  padding: 12px;
+  border: 1px solid rgba(242, 238, 229, 0.12);
+  background: rgba(16, 18, 14, 0.86);
+}
+
+.combatLog h2 {
+  margin: 0;
+}
+
+.combatLog p {
+  margin: 0;
+  color: #d5d0c2;
+  line-height: 1.35;
 }
 
 .combatFooter {
@@ -699,6 +730,7 @@ h2 {
   }
 
   .jsonTools,
+  .combatMain,
   .nestedItem,
   .effectRow {
     display: grid;
