@@ -1,4 +1,4 @@
-import type { CardDefinition, CardFilter, CardZone, CharacterDefinition, ContentPack, Effect, EffectOperation, EffectParam, EffectTarget, EnemyDefinition, GameEvent, Rarity, RelicDefinition, RelicTrigger, StatusEffect } from "./types";
+import type { CardDefinition, CardFilter, CardZone, CharacterDefinition, ContentPack, Effect, EffectOperation, EffectParam, EffectTarget, EnemyDefinition, EventAction, EventActionType, GameEvent, Rarity, RelicDefinition, RelicTrigger, StatusEffect } from "./types";
 
 const player = "player" as const;
 const selectedEnemy = "selectedEnemy" as const;
@@ -160,8 +160,35 @@ export const enemies: EnemyDefinition[] = [
 ];
 
 export const events: GameEvent[] = [
+  { id: "act1_bone_toll", title: "骨桥税", acts: [1], body: "一座窄桥横在裂谷上，桥柱用旧骨编号。守桥的影子伸出一只手。", choices: [{ id: "pay_hp", label: "以血通行", description: "失去 6 生命，获得 55 金币。", actions: [{ type: "loseHp", amount: 6 }, { type: "gainGold", amount: 55 }] }, { id: "refuse", label: "绕路", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act1_moth_shrine", title: "扑灯者神龛", acts: [1], body: "一群灰蛾贴在微弱灯芯上，翅膀拼出你牌组里某张牌的轮廓。", choices: [{ id: "offer", label: "靠近灯芯", description: "失去 4 生命，随机升级一张牌。", actions: [{ type: "loseHp", amount: 4 }, { type: "upgradeRandom" }] }, { id: "leave", label: "离开", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act1_rusted_lockbox", title: "锈锁盒", acts: [1], body: "盒子里有轻微的心跳声。锁孔旁刻着一行小字：不要空手打开。", choices: [{ id: "force", label: "撬开", description: "加入一张诅咒，获得一个遗物。", actions: [{ type: "addCurse", cardId: "curse" }, { type: "gainRelic" }] }, { id: "leave", label: "放回原处", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act1_white_knife", title: "白柄小刀", acts: [1], body: "小刀插在木桌上，旁边整齐摆着被削薄的基础牌。", choices: [{ id: "trim", label: "削去旧习", description: "移除一张基础牌。", actions: [{ type: "removeRandomBasic" }] }, { id: "leave", label: "不碰刀", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act1_hollow_duel", title: "空壳挑战", acts: [1], body: "一个空壳把自己摆成决斗姿势，胸腔里塞着金币。", choices: [{ id: "fight", label: "接受挑战", description: "开始一场普通事件战斗。胜利后获得 45 金币。", actions: [{ type: "startEventCombat", tier: "normal", onWinActions: [{ type: "gainGold", amount: 45 }] }] }, { id: "leave", label: "绕开它", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act1_ink_swap", title: "墨水置换", acts: [1], body: "一瓶黑墨反复写出同一个问题：你愿意忘掉哪一种手感？", choices: [{ id: "rewrite", label: "重写一张牌", description: "随机变形一张非诅咒牌。", actions: [{ type: "transformRandomCard" }] }, { id: "leave", label: "塞上瓶塞", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_silver_surgery", title: "银线手术", acts: [2], body: "无脸医生举起银线，保证能把脆弱的地方缝得更宽。", choices: [{ id: "accept", label: "接受手术", description: "失去 10 生命，最大生命 +8。", actions: [{ type: "loseHp", amount: 10 }, { type: "gainMaxHp", amount: 8 }] }, { id: "leave", label: "谢绝", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_debt_market", title: "债务集市", acts: [2], body: "摊主们只收未来。每个价签都比你眨眼快一点。", choices: [{ id: "borrow", label: "赊一袋钱", description: "获得 90 金币，威胁 +2。", actions: [{ type: "gainGold", amount: 90 }, { type: "gainThreat", amount: 2 }] }, { id: "leave", label: "离开摊位", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_stained_crown", title: "污冠陈列柜", acts: [2], body: "柜中冠冕缺了一角，却仍命令你跪下。", choices: [{ id: "kneel", label: "跪下取冠", description: "最大生命 -5，获得一个遗物。", actions: [{ type: "loseMaxHp", amount: 5 }, { type: "gainRelic" }] }, { id: "leave", label: "合上柜门", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_oracle_trial", title: "灰烬预言", acts: [2], body: "预言家把你的影子切成两段，要求其中一段证明自己。", choices: [{ id: "fight", label: "证明自己", description: "开始一场精英事件战斗。胜利后获得一个遗物。", actions: [{ type: "startEventCombat", tier: "elite", onWinActions: [{ type: "gainRelic" }] }] }, { id: "leave", label: "收回影子", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_bitter_fountain", title: "苦泉", acts: [2], body: "泉水上漂着细小铁锈，喝下去的人会梦见更短的路。", choices: [{ id: "drink", label: "饮下苦泉", description: "恢复 28 生命，加入一张诅咒。", actions: [{ type: "heal", amount: 28 }, { type: "addCurse", cardId: "curse" }] }, { id: "leave", label: "不喝", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act2_red_ledger", title: "红账本", acts: [2], body: "账本自动翻到你的名字，欠款栏空着，抵押栏却已经写满。", choices: [{ id: "sign", label: "签下名字", description: "加入一张诅咒，获得 130 金币。", actions: [{ type: "addCurse", cardId: "curse" }, { type: "gainGold", amount: 130 }] }, { id: "leave", label: "撕掉页角", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_last_workbench", title: "最后工台", acts: [3], body: "工台上的工具都朝向你，像等待最后一次使用。", choices: [{ id: "reforge", label: "重铸牌组", description: "随机升级一张牌，并随机变形一张非诅咒牌。", actions: [{ type: "upgradeRandom" }, { type: "transformRandomCard" }] }, { id: "leave", label: "保留现状", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_threat_vault", title: "威胁金库", acts: [3], body: "金库门已经打开，里面的金子在低声模仿警报。", choices: [{ id: "loot", label: "拿走金子", description: "获得 180 金币，威胁 +3。", actions: [{ type: "gainGold", amount: 180 }, { type: "gainThreat", amount: 3 }] }, { id: "leave", label: "关上金库", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_needle_circle", title: "针环仪式", acts: [3], body: "一圈细针悬在空中，每根针都指向你牌组里最旧的部分。", choices: [{ id: "submit", label: "站进针环", description: "失去 12 生命，移除一张基础牌，获得一个遗物。", actions: [{ type: "loseHp", amount: 12 }, { type: "removeRandomBasic" }, { type: "gainRelic" }] }, { id: "leave", label: "退后", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_crown_echo", title: "王冠回声", acts: [3], body: "一枚不存在的王冠在大厅尽头回响，命令你带着战利品离开或留下。", choices: [{ id: "fight", label: "抗命", description: "开始一场精英事件战斗。胜利后获得 80 金币和一个遗物。", actions: [{ type: "startEventCombat", tier: "elite", onWinActions: [{ type: "gainGold", amount: 80 }, { type: "gainRelic" }] }] }, { id: "leave", label: "顺从离开", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_empty_bargain", title: "空白交易", acts: [3], body: "一位无名商人把空白契约推给你，价格栏不断缩小。", choices: [{ id: "take", label: "签下契约", description: "最大生命 -7，获得一个遗物和 70 金币。", actions: [{ type: "loseMaxHp", amount: 7 }, { type: "gainRelic" }, { type: "gainGold", amount: 70 }] }, { id: "leave", label: "拒绝", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "act3_black_sun", title: "黑日余烬", acts: [3], body: "一团黑色余烬浮在空中，燃烧方式像一次倒放的黎明。", choices: [{ id: "touch", label: "握住余烬", description: "失去 18 生命，随机升级一张牌，威胁 +1。", actions: [{ type: "loseHp", amount: 18 }, { type: "upgradeRandom" }, { type: "gainThreat", amount: 1 }] }, { id: "leave", label: "让它熄灭", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "quiet_forge", title: "静默熔炉", body: "熔炉没有火声，只有牌面被重新压平的细响。", choices: [{ id: "temper", label: "淬炼", description: "支付 35 金币，随机升级一张牌。", actions: [{ type: "loseGold", amount: 35 }, { type: "upgradeRandom" }] }, { id: "leave", label: "离开", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "broken_waystone", title: "断裂路标", body: "路标指向三条不存在的路，其中一条正好穿过你的牌组。", choices: [{ id: "reroute", label: "改写路线", description: "威胁 +1，随机变形一张非诅咒牌。", actions: [{ type: "gainThreat", amount: 1 }, { type: "transformRandomCard" }] }, { id: "leave", label: "走原路", description: "继续前进。", actions: [{ type: "skip" }] }] },
+  { id: "cold_donation_box", title: "冰冷捐献箱", body: "箱子里没有硬币，只有一枚等着被承认的名字牌。", choices: [{ id: "donate", label: "投入金币", description: "支付 50 金币，获得一个遗物。", actions: [{ type: "loseGold", amount: 50 }, { type: "gainRelic" }] }, { id: "leave", label: "不投", description: "继续前进。", actions: [{ type: "skip" }] }] },
   { id: "sinkhole_gate", title: "下沉的门", body: "一段旧路塌进黑暗，门楣上刻着仍在变热的数字。", choices: [{ id: "enter", label: "进入副本", description: "进入一张临时地图。完成后威胁 +2；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 2 }, { id: "leave", label: "绕开", description: "继续前进。", effect: "skip" }] },
   { id: "sealed_lift", title: "封印升降台", body: "铁链通往一片陌生层面，回程的铃声听起来并不可靠。", choices: [{ id: "descend", label: "启动升降台", description: "进入一张临时地图。完成后威胁 +3；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 3 }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] },
+  { id: "cracked_stairwell", title: "破裂阶梯", body: "一截阶梯从墙里伸出，向下绕进没有回声的夹层。每一级都像刚被踩碎过。", choices: [{ id: "descend", label: "沿阶梯下行", description: "进入一张临时地图。完成后威胁 +2；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 2 }, { id: "leave", label: "封住裂口", description: "继续前进。", effect: "skip" }] },
+  { id: "humming_archive", title: "低鸣档案室", body: "铁门后传来纸页翻动的声音，明明这里没有风，也没有手。", choices: [{ id: "enter", label: "推门进入", description: "进入一张临时地图。完成后威胁 +2；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 2 }, { id: "leave", label: "记下门牌", description: "继续前进。", effect: "skip" }] },
+  { id: "bloodless_gate", title: "无血之门", body: "白色门环干净得过分，四周却堆满旧绷带。门后有东西在等一个活人。", choices: [{ id: "open", label: "拉开门环", description: "进入一张临时地图。完成后威胁 +3；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 3 }, { id: "leave", label: "不要碰它", description: "继续前进。", effect: "skip" }] },
+  { id: "mirror_well", title: "镜井", body: "井口没有水，只有一面向下延伸的镜子。倒影比你慢半拍抬起头。", choices: [{ id: "climb", label: "攀入倒影", description: "进入一张临时地图。完成后威胁 +3；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 3 }, { id: "leave", label: "盖上井盖", description: "继续前进。", effect: "skip" }] },
+  { id: "buried_station", title: "埋没站台", body: "废弃站台露出半截月台灯，轨道深处传来准点的刹车声。", choices: [{ id: "board", label: "登上暗车", description: "进入一张临时地图。完成后威胁 +3；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 3 }, { id: "leave", label: "离开站台", description: "继续前进。", effect: "skip" }] },
+  { id: "black_lantern_path", title: "黑灯小径", body: "一排黑灯在岔路上亮起，火焰没有温度，却把你的影子拉得很长。", choices: [{ id: "follow", label: "跟随黑灯", description: "进入一张临时地图。完成后威胁 +4；击败副本首领可获得金币、卡牌和宝箱。", effect: "enterDungeon", dungeonThreat: 4 }, { id: "leave", label: "熄灭第一盏灯", description: "继续前进。", effect: "skip" }] },
   { id: "altar", title: "静齿祭坛", body: "金币在石圣的口中闪光。它索要一点温度。", choices: [{ id: "take", label: "取走金币", description: "获得 45 金币，失去 8 点生命。", effect: "gainGoldLoseHp" }, { id: "pray", label: "献上一张牌", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] },
   { id: "pool", title: "无月之池", body: "黑水映出一个更健康的你，笑得过分灿烂。", choices: [{ id: "drink", label: "饮下池水", description: "恢复 18 点生命，加入一张诅咒。", effect: "healGainCurse" }, { id: "study", label: "凝视倒影", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] },
   { id: "caravan", title: "失落商队", body: "车队早已废弃，但锁上还有新鲜抓痕。", choices: [{ id: "loot", label: "快速搜刮", description: "获得 45 金币，失去 8 点生命。", effect: "gainGoldLoseHp" }, { id: "repair", label: "修整装备", description: "随机升级一张牌。", effect: "upgradeRandom" }, { id: "leave", label: "离开", description: "继续前进。", effect: "skip" }] }
@@ -194,7 +221,7 @@ export const characters: Record<string, CharacterDefinition> = {
 };
 
 export const defaultCharacterId = "wanderer";
-export const defaultContentPack: ContentPack = { cards, enemies, relics, characters, defaultCharacterId };
+export const defaultContentPack: ContentPack = { cards, enemies, relics, characters, events, defaultCharacterId };
 
 export const CONTENT_DRAFT_KEY = "netspire-content-draft";
 
@@ -210,6 +237,7 @@ export const relicTriggers = ["runStart", "combatStart", "turnStart", "turnEnd",
 export const statuses = ["weak", "vulnerable", "frail", "poison", "burn", "bleed", "strength", "magic", "dexterity", "thorns", "regen", "platedArmor", "artifact", "intangible"] as const;
 export const cardZones = ["drawPile", "hand", "discardPile", "exhaustPile", "deck"] as const;
 export const cardFilters = ["any", ...cardTypes, ...rarities, "upgraded", "notUpgraded"] as const;
+export const eventActionTypes = ["gainGold", "loseGold", "loseHp", "heal", "gainMaxHp", "loseMaxHp", "addCard", "addCurse", "upgradeRandom", "removeRandomBasic", "transformRandomCard", "gainRelic", "gainThreat", "enterDungeon", "startEventCombat", "skip"] as const;
 const idPattern = /^[a-z0-9_-]+$/;
 
 export function loadContentPack(): ContentPack {
@@ -244,8 +272,52 @@ export function normalizeContentPack(pack: Partial<ContentPack>): ContentPack {
   }));
   const normalizedRelics = Object.fromEntries(Object.entries(pack.relics ?? relics).map(([key, relic]) => [key, { ...relic, trigger: migrateRelicTrigger(relic.trigger), effects: normalizeEffects(relic.effects, "relic") }])) as Record<string, RelicDefinition>;
   const normalizedCharacters = pack.characters ?? characters;
+  const normalizedEvents = normalizeEvents(pack.events ?? events);
   const normalizedDefaultCharacterId = pack.defaultCharacterId && normalizedCharacters[pack.defaultCharacterId] ? pack.defaultCharacterId : defaultCharacterId;
-  return { cards: normalizedCards, enemies: normalizedEnemies, relics: normalizedRelics, characters: normalizedCharacters, defaultCharacterId: normalizedDefaultCharacterId };
+  return { cards: normalizedCards, enemies: normalizedEnemies, relics: normalizedRelics, characters: normalizedCharacters, events: normalizedEvents, defaultCharacterId: normalizedDefaultCharacterId };
+}
+
+function normalizeEvents(input: unknown): GameEvent[] {
+  if (!Array.isArray(input)) return events;
+  return input.map((event) => {
+    const item = event as Partial<GameEvent>;
+    return {
+      id: item.id ?? "event",
+      title: item.title ?? "Event",
+      body: item.body ?? "",
+      acts: item.acts?.filter((act) => Number.isInteger(act) && act >= 1 && act <= 3),
+      weight: item.weight,
+      choices: Array.isArray(item.choices) ? item.choices.map((choice) => ({
+        ...choice,
+        actions: normalizeEventActions(choice.actions?.length ? choice.actions : legacyEventActions(choice))
+      })) : []
+    };
+  });
+}
+
+function legacyEventActions(choice: Partial<GameEvent["choices"][number]>): EventAction[] {
+  if (choice.effect === "gainGoldLoseHp") return [{ type: "gainGold", amount: 45 }, { type: "loseHp", amount: 8 }];
+  if (choice.effect === "healGainCurse") return [{ type: "heal", amount: 18 }, { type: "addCurse", cardId: "curse" }];
+  if (choice.effect === "upgradeRandom") return [{ type: "upgradeRandom" }];
+  if (choice.effect === "enterDungeon") return [{ type: "enterDungeon", dungeonThreat: choice.dungeonThreat ?? 2 }];
+  return [{ type: "skip" }];
+}
+
+function normalizeEventActions(actions: unknown): EventAction[] {
+  if (!Array.isArray(actions)) return [{ type: "skip" }];
+  return actions.map((action) => {
+    const item = action as Partial<EventAction>;
+    return {
+      type: eventActionTypes.includes(item.type as EventActionType) ? item.type as EventActionType : "skip",
+      amount: item.amount,
+      cardId: item.cardId,
+      relicId: item.relicId,
+      tier: tiers.includes(item.tier as EnemyDefinition["tier"]) ? item.tier : undefined,
+      encounterId: item.encounterId,
+      dungeonThreat: item.dungeonThreat,
+      onWinActions: item.onWinActions ? normalizeEventActions(item.onWinActions) : undefined
+    };
+  });
 }
 
 export function validateContentPack(pack: ContentPack): { valid: boolean; errors: string[] } {
@@ -255,6 +327,7 @@ export function validateContentPack(pack: ContentPack): { valid: boolean; errors
   if (!Array.isArray(pack.enemies) || pack.enemies.length === 0) errors.push("At least one enemy is required.");
   if (!pack.relics || typeof pack.relics !== "object") errors.push("Relics must be an object.");
   if (!pack.characters || typeof pack.characters !== "object") errors.push("Characters must be an object.");
+  if (!Array.isArray(pack.events) || pack.events.length === 0) errors.push("At least one event is required.");
   if (!pack.defaultCharacterId || !pack.characters?.[pack.defaultCharacterId]) errors.push("Default character must reference a valid character.");
 
   Object.entries(pack.cards ?? {}).forEach(([key, card]) => {
@@ -320,7 +393,47 @@ export function validateContentPack(pack: ContentPack): { valid: boolean; errors
     });
   });
 
+  const eventIds = new Set<string>();
+  (pack.events ?? []).forEach((event) => {
+    validateId(event?.id, "Event", errors);
+    if (eventIds.has(event.id)) errors.push(`Event ${event.id} id is duplicated.`);
+    eventIds.add(event.id);
+    if (!event.title) errors.push(`Event ${event.id} needs a title.`);
+    if (!event.body) errors.push(`Event ${event.id} needs body text.`);
+    event.acts?.forEach((act) => {
+      if (!Number.isInteger(act) || act < 1 || act > 3) errors.push(`Event ${event.id} act must be 1, 2, or 3.`);
+    });
+    if (event.weight !== undefined) validateInteger(event.weight, `Event ${event.id} weight`, errors, 1);
+    if (!Array.isArray(event.choices) || event.choices.length === 0) errors.push(`Event ${event.id} needs at least one choice.`);
+    event.choices?.forEach((choice, choiceIndex) => {
+      validateId(choice.id, `Event ${event.id} choice`, errors);
+      if (!choice.label) errors.push(`Event ${event.id} choice ${choiceIndex + 1} needs a label.`);
+      if (!choice.description) errors.push(`Event ${event.id} choice ${choiceIndex + 1} needs a description.`);
+      validateEventActions(choice.actions ?? legacyEventActions(choice), `Event ${event.id} choice ${choice.id}`, pack, errors);
+    });
+  });
+
   return { valid: errors.length === 0, errors };
+}
+
+function validateEventActions(actions: EventAction[], label: string, pack: ContentPack, errors: string[]) {
+  if (!Array.isArray(actions) || actions.length === 0) {
+    errors.push(`${label} needs at least one action.`);
+    return;
+  }
+  actions.forEach((action, index) => {
+    const actionLabel = `${label} action ${index + 1}`;
+    if (!eventActionTypes.includes(action.type)) errors.push(`${actionLabel} has invalid type.`);
+    if (action.amount !== undefined) validateInteger(action.amount, `${actionLabel} amount`, errors);
+    if ((action.type === "addCard" || action.type === "addCurse") && action.cardId && !pack.cards[action.cardId]) errors.push(`${actionLabel} references missing card ${action.cardId}.`);
+    if (action.type === "gainRelic" && action.relicId && !pack.relics[action.relicId]) errors.push(`${actionLabel} references missing relic ${action.relicId}.`);
+    if (action.type === "enterDungeon" && action.dungeonThreat !== undefined) validateInteger(action.dungeonThreat, `${actionLabel} dungeon threat`, errors, 0);
+    if (action.type === "startEventCombat") {
+      if (action.tier && !tiers.includes(action.tier)) errors.push(`${actionLabel} has invalid tier.`);
+      if (action.encounterId && !pack.enemies.some((enemy) => enemy.id === action.encounterId)) errors.push(`${actionLabel} references missing enemy ${action.encounterId}.`);
+      if (action.onWinActions) validateEventActions(action.onWinActions, `${actionLabel} on win`, pack, errors);
+    }
+  });
 }
 
 function validateId(id: string | undefined, label: string, errors: string[]) {

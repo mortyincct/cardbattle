@@ -1,6 +1,6 @@
-import { cards, enemies, events, loadContentPack, normalizeContentPack } from "./content";
+import { cards, enemies, loadContentPack, normalizeContentPack } from "./content";
 import { mulberry32, pick, shuffle, uid } from "./rng";
-import type { ActivePower, CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
+import type { ActivePower, CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, EventAction, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
 export const SAVE_VERSION = 7;
@@ -78,7 +78,8 @@ function normalizeLoadedRun(run: RunState): RunState {
     rngCounter: run.rngCounter ?? 0,
     contentPack: run.contentPack ? normalizeContentPack(run.contentPack) : undefined,
     combat: run.combat ? normalizeCombat(run.combat) : undefined,
-    dungeon: run.dungeon
+    dungeon: run.dungeon,
+    eventCombat: run.eventCombat
   };
 }
 
@@ -114,6 +115,7 @@ function migrateLegacyRun(run: RunState): RunState {
     activeEvent: undefined,
     shopOffer: undefined,
     dungeon: undefined,
+    eventCombat: undefined,
     map: generateMap(mulberry32(run.seed + act * 1009), act, pack),
     rngCounter: run.rngCounter ?? 0,
     message: `第 ${act} 幕开始。选择新的路线。`
@@ -243,7 +245,7 @@ export function moveToNode(run: RunState, nodeId: string): RunState {
     next.screen = "combat";
     next.message = `${nodeTypeLabel(node.type)}战斗开始。`;
   } else if (node.type === "event") {
-    next.activeEvent = pick(events, mulberry32(next.seed + next.movesTaken));
+    next.activeEvent = pickEvent(next, mulberry32(next.seed + next.movesTaken));
     next.screen = "event";
   } else if (node.type === "shop") {
     next.shopOffer = makeRewardCards(next, 5);
@@ -277,17 +279,19 @@ export function completeNode(run: RunState): RunState {
   next.pendingReward = undefined;
   next.activeEvent = undefined;
   next.shopOffer = undefined;
+  next.eventCombat = undefined;
   return next;
 }
 
-export function startCombat(run: RunState, nodeType: NodeType): CombatState {
+export function startCombat(run: RunState, nodeType: NodeType, encounterId?: string): CombatState {
   run.player.physicalArmor = 0;
   run.player.magicArmor = 0;
   const random = mulberry32(run.seed + run.movesTaken * 97);
   const tier = nodeType === "boss" ? "boss" : nodeType === "elite" ? "elite" : "normal";
   const node = run.map.find((item) => item.id === run.currentNodeId);
   const pack = getContentPack(run);
-  const boundEnemy = node?.encounterId ? pack.enemies.find((enemy) => enemy.id === node.encounterId && enemy.tier === tier) : undefined;
+  const boundEncounterId = encounterId ?? node?.encounterId;
+  const boundEnemy = boundEncounterId ? pack.enemies.find((enemy) => enemy.id === boundEncounterId && enemy.tier === tier) : undefined;
   const candidates = boundEnemy ? [boundEnemy] : pack.enemies.filter((enemy) => enemy.tier === tier);
   const count = tier === "normal" && random() > 0.45 ? 2 : 1;
   const enemyStates = Array.from({ length: count }, () => toEnemyState(pick(candidates, random), run.threat));
@@ -588,6 +592,7 @@ function resolveEnemyMove(run: RunState, enemy: EnemyState, move: EnemyMove, ran
 
 function winCombat(run: RunState): RunState {
   applyTriggeredEffects(run, "combatWon", { source: "character", sourceOwner: run.player });
+  if (run.eventCombat) return finishEventCombat(run);
   const node = run.map.find((item) => item.id === run.currentNodeId);
   if (node?.type === "boss") {
     if (run.dungeon) return leaveDungeon(run, "boss");
@@ -615,6 +620,7 @@ function advanceAct(run: RunState): RunState {
   run.pendingReward = undefined;
   run.activeEvent = undefined;
   run.shopOffer = undefined;
+  run.eventCombat = undefined;
   run.screen = "map";
   run.currentNodeId = "start";
   run.map = generateMap(mulberry32(run.seed + run.act * 1009), run.act, getContentPack(run), nextStart);
@@ -660,19 +666,71 @@ export function applyEventChoice(run: RunState, choiceId: string): RunState {
   const choice = run.activeEvent?.choices.find((item) => item.id === choiceId);
   if (!choice) return run;
   const next = clone(run);
-  if (choice.effect === "gainGoldLoseHp") {
-    next.player.gold += 45;
-    next.player.hp = Math.max(1, next.player.hp - 8);
-  } else if (choice.effect === "healGainCurse") {
-    next.player.hp = Math.min(next.player.maxHp, next.player.hp + 18);
-    next.deck.push(makeCard("curse"));
-  } else if (choice.effect === "upgradeRandom") {
-    upgradeRandom(next);
-  } else if (choice.effect === "enterDungeon") {
-    return enterDungeon(next, choice.dungeonThreat ?? DUNGEON_DEFAULT_THREAT);
-  }
+  const applied = applyEventActions(next, eventChoiceActions(choice), true);
+  if (applied.screen !== "event") return applied;
   next.message = choice.description;
   return completeNode(next);
+}
+
+function eventChoiceActions(choice: { effect?: string; dungeonThreat?: number; actions?: EventAction[] }): EventAction[] {
+  if (choice.actions?.length) return choice.actions;
+  if (choice.effect === "gainGoldLoseHp") return [{ type: "gainGold", amount: 45 }, { type: "loseHp", amount: 8 }];
+  if (choice.effect === "healGainCurse") return [{ type: "heal", amount: 18 }, { type: "addCurse", cardId: "curse" }];
+  if (choice.effect === "upgradeRandom") return [{ type: "upgradeRandom" }];
+  if (choice.effect === "enterDungeon") return [{ type: "enterDungeon", dungeonThreat: choice.dungeonThreat ?? DUNGEON_DEFAULT_THREAT }];
+  return [{ type: "skip" }];
+}
+
+function applyEventActions(run: RunState, actions: EventAction[], completeAfter = false): RunState {
+  for (const action of actions) {
+    const amount = action.amount ?? 0;
+    if (action.type === "skip") continue;
+    if (action.type === "gainGold") run.player.gold += amount;
+    else if (action.type === "loseGold") run.player.gold = Math.max(0, run.player.gold - amount);
+    else if (action.type === "loseHp") run.player.hp = Math.max(1, run.player.hp - amount);
+    else if (action.type === "heal") run.player.hp = Math.min(run.player.maxHp, run.player.hp + amount);
+    else if (action.type === "gainMaxHp") {
+      run.player.maxHp += amount;
+      run.player.hp = Math.min(run.player.maxHp, run.player.hp + amount);
+    } else if (action.type === "loseMaxHp") {
+      run.player.maxHp = Math.max(1, run.player.maxHp - amount);
+      run.player.hp = Math.min(run.player.hp, run.player.maxHp);
+    } else if (action.type === "addCard") run.deck.push(makeCard(action.cardId ?? "wound"));
+    else if (action.type === "addCurse") run.deck.push(makeCard(action.cardId ?? "curse"));
+    else if (action.type === "upgradeRandom") upgradeRandom(run);
+    else if (action.type === "removeRandomBasic") removeRandomBasic(run);
+    else if (action.type === "transformRandomCard") transformRandomCard(run);
+    else if (action.type === "gainRelic") gainEventRelic(run, action.relicId);
+    else if (action.type === "gainThreat") run.threat = Math.max(0, run.threat + amount);
+    else if (action.type === "enterDungeon") return enterDungeon(run, action.dungeonThreat ?? action.amount ?? DUNGEON_DEFAULT_THREAT);
+    else if (action.type === "startEventCombat") return startEventCombat(run, action);
+  }
+  return completeAfter ? run : run;
+}
+
+function startEventCombat(run: RunState, action: EventAction): RunState {
+  const tier = action.tier ?? "normal";
+  const nodeType: NodeType = tier === "boss" ? "boss" : tier === "elite" ? "elite" : "combat";
+  run.eventCombat = { returnNodeId: run.currentNodeId, onWinActions: action.onWinActions ?? [] };
+  run.activeEvent = undefined;
+  run.pendingReward = undefined;
+  run.shopOffer = undefined;
+  run.combat = startCombat(run, nodeType, action.encounterId);
+  run.screen = "combat";
+  run.message = "事件战斗开始。";
+  return run;
+}
+
+function finishEventCombat(run: RunState): RunState {
+  const eventCombat = run.eventCombat;
+  if (!eventCombat) return run;
+  run.eventCombat = undefined;
+  run.combat = undefined;
+  run.currentNodeId = eventCombat.returnNodeId;
+  run.screen = "map";
+  applyEventActions(run, eventCombat.onWinActions, false);
+  run.message = "事件战斗胜利。";
+  return completeNode(run);
 }
 
 function enterDungeon(run: RunState, threatIncrease: number): RunState {
@@ -689,6 +747,7 @@ function enterDungeon(run: RunState, threatIncrease: number): RunState {
   run.pendingReward = undefined;
   run.activeEvent = undefined;
   run.shopOffer = undefined;
+  run.eventCombat = undefined;
   run.message = `进入副本。完成后威胁 +${run.dungeon.threatIncrease}。`;
   return run;
 }
@@ -702,6 +761,7 @@ function leaveDungeon(run: RunState, reason: "exit" | "boss"): RunState {
   run.dungeon = undefined;
   run.threat += threatIncrease;
   run.combat = undefined;
+  run.eventCombat = undefined;
   run.activeEvent = undefined;
   run.shopOffer = undefined;
   if (reason === "exit") {
@@ -771,10 +831,36 @@ function makeRewardCards(run: RunState, amount: number): CardInstance[] {
   return Array.from({ length: amount }, () => makeCard(pick(rewardCardPool, random).id, random() > 0.88));
 }
 
+function pickEvent(run: RunState, random: () => number): GameEvent {
+  const pack = getContentPack(run);
+  const candidates = pack.events.filter((event) => !event.acts?.length || event.acts.includes(run.act));
+  const pool = candidates.length ? candidates : pack.events;
+  const weighted = pool.flatMap((event) => Array.from({ length: Math.max(1, event.weight ?? 1) }, () => event));
+  return pick(weighted.length ? weighted : pack.events, random);
+}
+
 function pickAvailableRelic(run: RunState): string | undefined {
   const random = mulberry32(run.seed + run.movesTaken * 991 + run.threat * 37);
   const candidates = Object.values(getContentPack(run).relics).filter((relic) => relic.rarity !== "basic" && !run.relics.includes(relic.id));
   return candidates.length ? pick(candidates, random).id : undefined;
+}
+
+function gainEventRelic(run: RunState, relicId?: string) {
+  const nextRelic = relicId && getContentPack(run).relics[relicId] ? relicId : pickAvailableRelic(run);
+  if (nextRelic && !run.relics.includes(nextRelic)) run.relics.push(nextRelic);
+}
+
+function removeRandomBasic(run: RunState) {
+  if (run.deck.length <= 1) return;
+  const removable = run.deck.find((card) => card.cardId === "strike") ?? run.deck.find((card) => card.cardId === "guard") ?? run.deck.find((card) => cardDefFrom(card, getContentPack(run)).rarity === "basic");
+  if (removable) run.deck = run.deck.filter((card) => card.uid !== removable.uid);
+}
+
+function transformRandomCard(run: RunState) {
+  const random = mulberry32(run.seed + run.movesTaken * 733 + run.threat * 19);
+  const index = run.deck.findIndex((card) => !["curse", "wound"].includes(card.cardId));
+  const rewardCardPool = Object.values(getContentPack(run).cards).filter((card) => !["basic", "status", "curse"].includes(card.rarity));
+  if (index >= 0 && rewardCardPool.length) run.deck[index] = makeCard(pick(rewardCardPool, random).id, random() > 0.88);
 }
 
 function drawCards(run: RunState, combat: CombatState, amount: number, random: () => number) {

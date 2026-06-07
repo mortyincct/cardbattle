@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { applyEventChoice, buyFromShop, chooseRewardCard, claimTreasure, clearSave, completeCardChoice, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, restAtCampfire, saveRun, SAVE_KEY, SAVE_VERSION, scaleEnemy, shopService, startCombat } from "./state";
-import { clearContentDraft, CONTENT_DRAFT_KEY, defaultContentPack, enemies, loadContentPack, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
-import type { Effect, EnemyState, EventChoice, RunState, StatusEffect } from "./types";
+import { clearContentDraft, CONTENT_DRAFT_KEY, defaultContentPack, enemies, events, loadContentPack, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
+import type { Effect, EnemyState, EventChoice, GameEvent, RunState, StatusEffect } from "./types";
 
 beforeEach(() => {
   localStorage.removeItem(CONTENT_DRAFT_KEY);
@@ -713,6 +713,84 @@ describe("events, campfires, shops, and treasure", () => {
     expect(skipped.screen).toBe("map");
   });
 
+  it("applies parameterized event actions and completes the node", () => {
+    const run = makeActionEventRun({
+      id: "action-event",
+      title: "Action Event",
+      body: "Test body.",
+      choices: [{
+        id: "choice",
+        label: "Choice",
+        description: "Action result.",
+        actions: [
+          { type: "gainGold", amount: 30 },
+          { type: "loseHp", amount: 5 },
+          { type: "gainMaxHp", amount: 3 },
+          { type: "addCurse", cardId: "curse" },
+          { type: "gainThreat", amount: 2 }
+        ]
+      }]
+    });
+    const hp = run.player.hp;
+    const maxHp = run.player.maxHp;
+    const gold = run.player.gold;
+
+    const next = applyEventChoice(run, "choice");
+
+    expect(next.player.gold).toBe(gold + 30);
+    expect(next.player.maxHp).toBe(maxHp + 3);
+    expect(next.player.hp).toBe(hp - 2);
+    expect(next.deck.some((card) => card.cardId === "curse")).toBe(true);
+    expect(next.threat).toBe(run.threat + 2);
+    expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
+
+  it("filters content pack events by act when entering event nodes", () => {
+    const run = makeScreenRun("map");
+    run.act = 2;
+    run.currentNodeId = "start";
+    run.contentPack = normalizeContentPack({
+      ...defaultContentPack,
+      events: [
+        { id: "act_one_event", title: "Act One", body: "Wrong act.", acts: [1], choices: [{ id: "leave", label: "Leave", description: "Leave.", actions: [{ type: "skip" }] }] },
+        { id: "act_two_event", title: "Act Two", body: "Right act.", acts: [2], choices: [{ id: "leave", label: "Leave", description: "Leave.", actions: [{ type: "skip" }] }] }
+      ]
+    });
+
+    const next = moveToNode(run, "current-node");
+
+    expect(next.screen).toBe("event");
+    expect(next.activeEvent?.id).toBe("act_two_event");
+  });
+
+  it("runs event combats and applies on-win actions without normal combat rewards", () => {
+    let run = makeActionEventRun({
+      id: "fight-event",
+      title: "Fight Event",
+      body: "Test body.",
+      choices: [{
+        id: "fight",
+        label: "Fight",
+        description: "Fight.",
+        actions: [{ type: "startEventCombat", tier: "normal", encounterId: "hollow", onWinActions: [{ type: "gainGold", amount: 40 }, { type: "gainThreat", amount: 1 }] }]
+      }]
+    });
+    const gold = run.player.gold;
+    run = applyEventChoice(run, "fight");
+    expect(run.screen).toBe("combat");
+    expect(run.eventCombat?.returnNodeId).toBe("current-node");
+    run.combat = makeSingleHpCombat("hollow");
+
+    const next = playCard(run, "card-1", "enemy-1");
+
+    expect(next.screen).toBe("map");
+    expect(next.eventCombat).toBeUndefined();
+    expect(next.pendingReward).toBeUndefined();
+    expect(next.player.gold).toBe(gold + 40);
+    expect(next.threat).toBe(run.threat + 1);
+    expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
+
   it("rests at campfire with HP cap and upgrades one card", () => {
     const healRun = makeScreenRun("campfire");
     healRun.player.hp = healRun.player.maxHp - 5;
@@ -878,6 +956,35 @@ describe("content packs", () => {
     expect(expansionCards.filter((card) => card.rarity === "rare")).toHaveLength(20);
     expect(expansionCards.filter((card) => card.cost === 4)).toHaveLength(5);
     expect(expansionCards.filter((card) => [...card.effects, ...card.upgradedEffects].some((effect) => effect.selection === "manual"))).toHaveLength(14);
+  });
+
+  it("contains expanded optional dungeon entrance events", () => {
+    const dungeonEventIds = ["cracked_stairwell", "humming_archive", "bloodless_gate", "mirror_well", "buried_station", "black_lantern_path"];
+    const dungeonEvents = defaultContentPack.events.filter((event) => event.choices.some((choice) => choice.effect === "enterDungeon" || choice.actions?.some((action) => action.type === "enterDungeon")));
+    const eventIds = new Set(defaultContentPack.events.map((event) => event.id));
+
+    expect(dungeonEvents).toHaveLength(8);
+    expect(eventIds.size).toBe(defaultContentPack.events.length);
+    dungeonEventIds.forEach((id) => {
+      const event = defaultContentPack.events.find((item) => item.id === id);
+      const enterChoice = event?.choices.find((choice) => choice.effect === "enterDungeon" || choice.actions?.some((action) => action.type === "enterDungeon"));
+      const threat = enterChoice?.dungeonThreat ?? enterChoice?.actions?.find((action) => action.type === "enterDungeon")?.dungeonThreat;
+      expect(event).toBeTruthy();
+      expect(threat).toBeGreaterThanOrEqual(2);
+      expect(threat).toBeLessThanOrEqual(4);
+      expect(enterChoice?.description).toContain(`威胁 +${threat}`);
+      expect(event?.choices.some((choice) => choice.effect === "skip" || choice.actions?.some((action) => action.type === "skip"))).toBe(true);
+    });
+  });
+
+  it("contains the planned act-aware event expansion and normalizes legacy effects", () => {
+    const normalized = normalizeContentPack({ ...defaultContentPack, events });
+    expect(normalized.events.length).toBeGreaterThanOrEqual(30);
+    expect(normalized.events.filter((event) => event.acts?.includes(1)).length).toBeGreaterThanOrEqual(6);
+    expect(normalized.events.filter((event) => event.acts?.includes(2)).length).toBeGreaterThanOrEqual(6);
+    expect(normalized.events.filter((event) => event.acts?.includes(3)).length).toBeGreaterThanOrEqual(6);
+    expect(normalized.events.every((event) => event.choices.every((choice) => choice.actions?.length))).toBe(true);
+    expect(normalized.events.some((event) => event.choices.some((choice) => choice.actions?.some((action) => action.type === "startEventCombat")))).toBe(true);
   });
 
   it("loads default content without a draft and falls back from invalid draft data", () => {
@@ -1063,6 +1170,12 @@ function makeEventRun(effect: EventChoice["effect"]): RunState {
     body: "Test body.",
     choices: [{ id: "choice", label: "Choice", description: "Choice result.", effect }]
   };
+  return run;
+}
+
+function makeActionEventRun(event: GameEvent): RunState {
+  const run = makeScreenRun("event");
+  run.activeEvent = event;
   return run;
 }
 

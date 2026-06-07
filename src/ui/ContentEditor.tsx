@@ -1,10 +1,10 @@
 import { AlertTriangle, Copy, Download, Plus, RotateCcw, Save, Search, Trash2, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { cardFilters, cardTypes, cardZones, clearContentDraft, defaultContentPack, effectOps, effectParams, effectTargets, intents, normalizeContentPack, rarities, relicTriggers, saveContentDraft, statuses, tiers, validateContentPack } from "../game/content";
-import type { CardDefinition, CardType, CharacterDefinition, ContentPack, Effect, EffectCondition, EnemyDefinition, EnemyMove, Rarity, RelicDefinition, RelicTrigger, TriggeredEffect } from "../game/types";
+import { cardFilters, cardTypes, cardZones, clearContentDraft, defaultContentPack, effectOps, effectParams, effectTargets, eventActionTypes, intents, normalizeContentPack, rarities, relicTriggers, saveContentDraft, statuses, tiers, validateContentPack } from "../game/content";
+import type { CardDefinition, CardType, CharacterDefinition, ContentPack, Effect, EffectCondition, EnemyDefinition, EnemyMove, EventAction, EventActionType, EventChoice, GameEvent, Rarity, RelicDefinition, RelicTrigger, TriggeredEffect } from "../game/types";
 
-type EditorTab = "cards" | "enemies" | "relics" | "characters";
+type EditorTab = "cards" | "enemies" | "relics" | "characters" | "events";
 type ConfirmAction = "delete" | "reset" | "import" | null;
 type EditorMessage = { tone: "info" | "success" | "warn"; text: string };
 type EditorItem = { id: string; name: string; meta: string; tone: string };
@@ -29,10 +29,11 @@ const tabs: { id: EditorTab; label: string }[] = [
   { id: "cards", label: "Cards" },
   { id: "enemies", label: "Enemies" },
   { id: "relics", label: "Relics" },
-  { id: "characters", label: "Characters" }
+  { id: "characters", label: "Characters" },
+  { id: "events", label: "Events" }
 ];
 
-const tabNouns: Record<EditorTab, string> = { cards: "card", enemies: "enemy", relics: "relic", characters: "character" };
+const tabNouns: Record<EditorTab, string> = { cards: "card", enemies: "enemy", relics: "relic", characters: "character", events: "event" };
 const importDataStart = "--- NETSPIRE_CONTENT_JSON_START ---";
 const importDataEnd = "--- NETSPIRE_CONTENT_JSON_END ---";
 const contentFileTypes: FilePickerAcceptType[] = [
@@ -232,6 +233,7 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
           {tab === "enemies" ? <EnemyForm pack={pack} id={selected} setPack={updatePack} /> : null}
           {tab === "relics" ? <RelicForm pack={pack} id={selected} setPack={updatePack} /> : null}
           {tab === "characters" ? <CharacterForm pack={pack} id={selected} setPack={updatePack} /> : null}
+          {tab === "events" ? <EventForm pack={pack} id={selected} setPack={updatePack} /> : null}
           <div className="formSection dangerSection">
             <div>
               <h3>Danger zone</h3>
@@ -268,7 +270,7 @@ export function ContentEditor({ initialPack, onNewRun }: { initialPack: ContentP
         </div>
       </section>
 
-      {confirmAction ? <ConfirmDialog action={confirmAction} tab={tab} selectedName={selectedItem?.name ?? selected} onCancel={() => setConfirmAction(null)} onConfirm={runConfirmedAction} /> : null}
+      {confirmAction ? <ConfirmDialog action={confirmAction} tab={tab} selectedName={selectedItem ? itemDisplayName(selectedItem) : selected} onCancel={() => setConfirmAction(null)} onConfirm={runConfirmedAction} /> : null}
     </section>
   );
 }
@@ -385,6 +387,69 @@ function CharacterForm({ pack, id, setPack }: FormProps) {
   );
 }
 
+function EventForm({ pack, id, setPack }: FormProps) {
+  const event = pack.events.find((item) => item.id === id);
+  if (!event) return <EmptyForm noun="event" />;
+  const update = (patch: Partial<GameEvent>) => {
+    const nextEvent = { ...event, ...patch };
+    setPack(updateEvent(pack, id, nextEvent), nextEvent.id);
+  };
+  return (
+    <>
+      <FormSection title="Identity" description="Events are selected from the map event pool.">
+        <TextField label="ID" value={event.id} onChange={(value) => update({ id: value })} />
+        <TextField label="Title" value={event.title} onChange={(value) => update({ title: value })} />
+        <NumberField label="Weight" value={event.weight ?? 1} min={1} onChange={(value) => update({ weight: value <= 1 ? undefined : value })} />
+        <TextField label="Acts" value={event.acts?.join(",") ?? ""} onChange={(value) => update({ acts: parseActs(value) })} />
+        <TextAreaField label="Body" value={event.body} onChange={(value) => update({ body: value })} />
+      </FormSection>
+      <ChoiceList choices={event.choices} onChange={(choices) => update({ choices })} />
+    </>
+  );
+}
+
+function ChoiceList({ choices, onChange }: { choices: EventChoice[]; onChange: (choices: EventChoice[]) => void }) {
+  const update = (index: number, choice: EventChoice) => onChange(choices.map((item, i) => (i === index ? choice : item)));
+  return (
+    <fieldset className="nestedEditor">
+      <legend>Event choices</legend>
+      {choices.map((choice, index) => (
+        <div className="nestedItem" key={`${choice.id}-${index}`}>
+          <TextField label="Choice ID" value={choice.id} onChange={(value) => update(index, { ...choice, id: value })} />
+          <TextField label="Label" value={choice.label} onChange={(value) => update(index, { ...choice, label: value })} />
+          <TextAreaField label="Description" value={choice.description} onChange={(value) => update(index, { ...choice, description: value })} />
+          <EventActionList label="Actions" actions={choice.actions ?? []} onChange={(actions) => update(index, { ...choice, effect: undefined, dungeonThreat: undefined, actions })} />
+          <button className="miniButton removeButton" onClick={() => onChange(choices.filter((_, i) => i !== index))}>Remove choice</button>
+        </div>
+      ))}
+      <button className="miniButton addNestedButton" onClick={() => onChange([...choices, { id: uniqueId("choice", choices.map((choice) => choice.id)), label: "Leave", description: "Continue onward.", actions: [{ type: "skip" }] }])}>Add choice</button>
+    </fieldset>
+  );
+}
+
+function EventActionList({ label, actions, onChange }: { label: string; actions: EventAction[]; onChange: (actions: EventAction[]) => void }) {
+  const update = (index: number, action: EventAction) => onChange(actions.map((item, i) => (i === index ? normalizeEventAction(action) : item)));
+  return (
+    <fieldset className="nestedEditor">
+      <legend>{label}</legend>
+      {actions.map((action, index) => (
+        <div className="effectRow" key={`${action.type}-${index}`}>
+          <SelectField label="Type" value={action.type} options={eventActionTypes} onChange={(value) => update(index, { ...action, type: value as EventActionType })} />
+          {eventActionNeedsAmount(action.type) ? <NumberField label="Amount" value={action.amount ?? defaultEventActionAmount(action.type)} onChange={(value) => update(index, { ...action, amount: value })} /> : null}
+          {action.type === "addCard" || action.type === "addCurse" ? <TextField label="Card ID" value={action.cardId ?? (action.type === "addCurse" ? "curse" : "wound")} onChange={(value) => update(index, { ...action, cardId: value })} /> : null}
+          {action.type === "gainRelic" ? <TextField label="Relic ID" value={action.relicId ?? ""} onChange={(value) => update(index, { ...action, relicId: value || undefined })} /> : null}
+          {action.type === "enterDungeon" ? <NumberField label="Dungeon threat" value={action.dungeonThreat ?? action.amount ?? 2} min={0} onChange={(value) => update(index, { ...action, dungeonThreat: value })} /> : null}
+          {action.type === "startEventCombat" ? <SelectField label="Tier" value={action.tier ?? "normal"} options={tiers} onChange={(value) => update(index, { ...action, tier: value as EnemyDefinition["tier"] })} /> : null}
+          {action.type === "startEventCombat" ? <TextField label="Enemy ID" value={action.encounterId ?? ""} onChange={(value) => update(index, { ...action, encounterId: value || undefined })} /> : null}
+          {action.type === "startEventCombat" ? <EventActionList label="On win actions" actions={action.onWinActions ?? []} onChange={(onWinActions) => update(index, { ...action, onWinActions })} /> : null}
+          <button className="miniButton removeButton" onClick={() => onChange(actions.filter((_, i) => i !== index))}>Remove action</button>
+        </div>
+      ))}
+      <button className="miniButton addNestedButton" onClick={() => onChange([...actions, { type: "skip" }])}>Add action</button>
+    </fieldset>
+  );
+}
+
 function MoveList({ moves, onChange }: { moves: EnemyMove[]; onChange: (moves: EnemyMove[]) => void }) {
   const update = (index: number, move: EnemyMove) => onChange(moves.map((item, i) => (i === index ? move : item)));
   return (
@@ -464,12 +529,12 @@ function FormSection({ title, description, children }: { title: string; descript
   return <section className="formSection"><div className="formSectionHeader"><h3>{title}</h3><p>{description}</p></div><div className="formGrid">{children}</div></section>;
 }
 
-function PreviewPanel({ tab, item }: { tab: EditorTab; item?: CardDefinition | EnemyDefinition | RelicDefinition | CharacterDefinition }) {
+function PreviewPanel({ tab, item }: { tab: EditorTab; item?: CardDefinition | EnemyDefinition | RelicDefinition | CharacterDefinition | GameEvent }) {
   if (!item) return <section className="previewPanel"><div className="panelHeader"><h3>Preview</h3><span>{tab}</span></div><p className="emptyHint">Choose or create content.</p></section>;
   return (
     <section className="previewPanel">
       <div className="panelHeader"><h3>Preview</h3><span>{tabNouns[tab]}</span></div>
-      <strong>{item.name}</strong>
+      <strong>{"name" in item ? item.name : item.title}</strong>
       <p>{item.id}</p>
       <div className="effectSummary">{summaryLines(tab, item).map((line) => <span key={line}>{line}</span>)}</div>
     </section>
@@ -532,7 +597,7 @@ function formatReadableExport(pack: ContentPack) {
     "Netspire Content Editor Export",
     `Generated: ${new Date().toLocaleString()}`,
     `Default character: ${normalized.characters[normalized.defaultCharacterId]?.name ?? "Unknown"} (${normalized.defaultCharacterId})`,
-    `Totals: ${Object.keys(normalized.cards).length} cards, ${normalized.enemies.length} enemies, ${Object.keys(normalized.relics).length} relics, ${Object.keys(normalized.characters).length} characters`,
+    `Totals: ${Object.keys(normalized.cards).length} cards, ${normalized.enemies.length} enemies, ${Object.keys(normalized.relics).length} relics, ${Object.keys(normalized.characters).length} characters, ${normalized.events.length} events`,
     "",
     "Cards"
   ];
@@ -596,6 +661,21 @@ function formatReadableExport(pack: ContentPack) {
     lines.push("");
   });
 
+  lines.push("Events");
+  normalized.events.forEach((event, index) => {
+    lines.push(
+      `${index + 1}. ${event.title} [${event.id}]`,
+      `   Acts: ${event.acts?.join(", ") || "all"}. Weight: ${event.weight ?? 1}.`,
+      `   Body: ${event.body || "No body text."}`,
+      "   Choices:"
+    );
+    event.choices.forEach((choice, choiceIndex) => {
+      lines.push(`     ${choiceIndex + 1}. ${choice.label} [${choice.id}] - ${choice.description}`);
+      (choice.actions ?? []).forEach((action) => lines.push(`        - ${describeEventAction(action)}`));
+    });
+    lines.push("");
+  });
+
   lines.push(
     "Import data",
     "The editor uses the block below to restore this exact content.",
@@ -654,6 +734,14 @@ function describeEffect(effect: Effect) {
     return `${capitalize(target)} ${opVerb(effect.op)} ${amount} card${amount === 1 ? "" : "s"}${zoneMove}${cardFilter}${times}${condition}.`;
   }
   return `${capitalize(target)} ${opVerb(effect.op)} ${amount} ${readableParam(effect.param)}${cardFilter}${times}${condition}.`;
+}
+
+function describeEventAction(action: EventAction): string {
+  if (action.type === "startEventCombat") return `start ${action.tier ?? "normal"} event combat${action.encounterId ? ` against ${action.encounterId}` : ""}, then ${action.onWinActions?.map(describeEventAction).join("; ") || "complete"}`;
+  if (action.type === "enterDungeon") return `enter dungeon, threat +${action.dungeonThreat ?? action.amount ?? 2} on completion`;
+  if (action.type === "addCard" || action.type === "addCurse") return `${action.type} ${action.cardId ?? (action.type === "addCurse" ? "curse" : "card")}`;
+  if (action.type === "gainRelic") return `gain relic${action.relicId ? ` ${action.relicId}` : ""}`;
+  return `${action.type}${action.amount !== undefined ? ` ${action.amount}` : ""}`;
 }
 
 function describeCondition(condition: EffectCondition) {
@@ -764,6 +852,10 @@ function updateCharacter(pack: ContentPack, oldId: string, character: CharacterD
   return { ...pack, characters: nextCharacters, defaultCharacterId: pack.defaultCharacterId === oldId ? character.id : pack.defaultCharacterId };
 }
 
+function updateEvent(pack: ContentPack, oldId: string, event: GameEvent): ContentPack {
+  return { ...pack, events: pack.events.map((item) => (item.id === oldId ? event : item)) };
+}
+
 function createDefaultEntry(tab: EditorTab, pack: ContentPack): { pack: ContentPack; selected: string } {
   if (tab === "cards") {
     const id = uniqueId("new_card", Object.keys(pack.cards));
@@ -778,6 +870,11 @@ function createDefaultEntry(tab: EditorTab, pack: ContentPack): { pack: ContentP
     const id = uniqueId("new_relic", Object.keys(pack.relics));
     const relic: RelicDefinition = { id, name: "New Relic", rarity: "common", description: "At the start of each turn, gain 1 physical armor.", trigger: "turnStart", effects: [{ target: "player", param: "physicalArmor", op: "add", amount: 1 }] };
     return { pack: updateRelic(pack, id, relic), selected: id };
+  }
+  if (tab === "events") {
+    const id = uniqueId("new_event", pack.events.map((event) => event.id));
+    const event: GameEvent = { id, title: "New Event", body: "A strange place waits for a decision.", choices: [{ id: "leave", label: "Leave", description: "Continue onward.", actions: [{ type: "skip" }] }] };
+    return { pack: { ...pack, events: [...pack.events, event] }, selected: id };
   }
   const id = uniqueId("new_character", Object.keys(pack.characters));
   const character: CharacterDefinition = { id, name: "New Character", maxHp: 72, maxEnergy: 3, gold: 60, starterDeck: ["strike", "strike", "strike", "guard", "guard"], starterRelics: [], passives: [] };
@@ -803,6 +900,12 @@ function duplicateEntry(tab: EditorTab, id: string, pack: ContentPack): { ok: tr
     const newId = uniqueId(`${id}_copy`, Object.keys(pack.characters));
     return { ok: true, pack: updateCharacter(pack, newId, { ...clone(pack.characters[id]), id: newId, name: `${pack.characters[id].name} Copy` }), selected: newId };
   }
+  if (tab === "events") {
+    const event = pack.events.find((item) => item.id === id);
+    if (!event) return { ok: false, message: "No event to copy." };
+    const newId = uniqueId(`${id}_copy`, pack.events.map((item) => item.id));
+    return { ok: true, pack: { ...pack, events: [...pack.events, { ...clone(event), id: newId, title: `${event.title} Copy` }] }, selected: newId };
+  }
   return { ok: false, message: `No ${tabNouns[tab]} to copy.` };
 }
 
@@ -826,6 +929,11 @@ function removeEntry(tab: EditorTab, id: string, pack: ContentPack): { ok: true;
     const next = { ...pack, relics: nextRelics };
     return { ok: true, pack: next, selected: firstId(next, tab) };
   }
+  if (tab === "events") {
+    if (pack.events.length <= 1) return { ok: false, message: "At least one event is required." };
+    const next = { ...pack, events: pack.events.filter((event) => event.id !== id) };
+    return { ok: true, pack: next, selected: firstId(next, tab) };
+  }
   if (Object.keys(pack.characters).length <= 1) return { ok: false, message: "At least one character is required." };
   const nextCharacters = { ...pack.characters };
   delete nextCharacters[id];
@@ -838,6 +946,7 @@ function getTabItems(pack: ContentPack, tab: EditorTab): EditorItem[] {
   if (tab === "cards") return Object.values(pack.cards).map((card) => ({ id: card.id, name: card.name, meta: `${card.type} / ${card.rarity} / ${card.cost} cost`, tone: card.type }));
   if (tab === "enemies") return pack.enemies.map((enemy) => ({ id: enemy.id, name: enemy.name, meta: `${enemy.tier} / ${enemy.maxHp} HP / ${enemy.moves.length} moves`, tone: enemy.tier }));
   if (tab === "relics") return Object.values(pack.relics).map((relic) => ({ id: relic.id, name: relic.name, meta: `${relic.rarity} / ${relic.trigger}`, tone: relic.rarity }));
+  if (tab === "events") return pack.events.map((event) => ({ id: event.id, name: event.title, meta: `${event.acts?.join(",") || "all acts"} / ${event.choices.length} choices`, tone: "event" }));
   return Object.values(pack.characters).map((character) => ({ id: character.id, name: character.name, meta: `${character.maxHp} HP / ${character.maxEnergy} energy`, tone: character.id === pack.defaultCharacterId ? "rare" : "common" }));
 }
 
@@ -845,7 +954,12 @@ function getSelectedItem(pack: ContentPack, tab: EditorTab, id: string) {
   if (tab === "cards") return pack.cards[id];
   if (tab === "enemies") return pack.enemies.find((enemy) => enemy.id === id);
   if (tab === "relics") return pack.relics[id];
+  if (tab === "events") return pack.events.find((event) => event.id === id);
   return pack.characters[id];
+}
+
+function itemDisplayName(item: CardDefinition | EnemyDefinition | RelicDefinition | CharacterDefinition | GameEvent) {
+  return "name" in item ? item.name : item.title;
 }
 
 function firstId(pack: ContentPack, tab: EditorTab) {
@@ -854,7 +968,7 @@ function firstId(pack: ContentPack, tab: EditorTab) {
 
 function errorsForSelection(errors: string[], tab: EditorTab, id: string) {
   if (!id) return [];
-  const label = tab === "cards" ? "Card" : tab === "enemies" ? "Enemy" : tab === "relics" ? "Relic" : "Character";
+  const label = tab === "cards" ? "Card" : tab === "enemies" ? "Enemy" : tab === "relics" ? "Relic" : tab === "events" ? "Event" : "Character";
   return errors.filter((error) => error.includes(`${label} ${id}`) || error.includes(`${label} ${id}_`) || error.includes(`${label} ${id} `));
 }
 
@@ -873,6 +987,39 @@ function normalizeEffect(effect: Effect): Effect {
   return next;
 }
 
+function normalizeEventAction(action: EventAction): EventAction {
+  const next: EventAction = { ...action };
+  if (!eventActionTypes.includes(next.type)) next.type = "skip";
+  if (!eventActionNeedsAmount(next.type)) delete next.amount;
+  if (next.type !== "addCard" && next.type !== "addCurse") delete next.cardId;
+  if (next.type !== "gainRelic") delete next.relicId;
+  if (next.type !== "enterDungeon") delete next.dungeonThreat;
+  if (next.type !== "startEventCombat") {
+    delete next.tier;
+    delete next.encounterId;
+    delete next.onWinActions;
+  } else {
+    next.tier ??= "normal";
+    next.onWinActions ??= [];
+  }
+  return next;
+}
+
+function eventActionNeedsAmount(type: EventActionType) {
+  return ["gainGold", "loseGold", "loseHp", "heal", "gainMaxHp", "loseMaxHp", "gainThreat"].includes(type);
+}
+
+function defaultEventActionAmount(type: EventActionType) {
+  if (type === "gainGold" || type === "loseGold") return 50;
+  if (type === "gainThreat") return 1;
+  return 5;
+}
+
+function parseActs(value: string) {
+  const acts = value.split(/[,\s]+/).map((item) => Number(item)).filter((item) => Number.isInteger(item) && item >= 1 && item <= 3);
+  return acts.length ? Array.from(new Set(acts)) : undefined;
+}
+
 function parseCondition(text: string): EffectCondition | undefined {
   if (!text.trim()) return undefined;
   try {
@@ -882,7 +1029,7 @@ function parseCondition(text: string): EffectCondition | undefined {
   }
 }
 
-function summaryLines(tab: EditorTab, item: CardDefinition | EnemyDefinition | RelicDefinition | CharacterDefinition) {
+function summaryLines(tab: EditorTab, item: CardDefinition | EnemyDefinition | RelicDefinition | CharacterDefinition | GameEvent) {
   if (tab === "cards") {
     const card = item as CardDefinition;
     return [`${card.type} / ${card.rarity}`, `${card.effects.length} base effects`, `${card.upgradedEffects.length} upgraded effects`];
@@ -894,6 +1041,10 @@ function summaryLines(tab: EditorTab, item: CardDefinition | EnemyDefinition | R
   if (tab === "relics") {
     const relic = item as RelicDefinition;
     return [`${relic.rarity}`, relic.trigger, `${relic.effects.length} effects`];
+  }
+  if (tab === "events") {
+    const event = item as GameEvent;
+    return [`${event.acts?.join(", ") || "all acts"}`, `${event.choices.length} choices`, `weight ${event.weight ?? 1}`];
   }
   const character = item as CharacterDefinition;
   return [`${character.maxHp} HP`, `${character.maxEnergy} energy`, `${character.starterDeck.length} cards`, `${character.passives.length} passives`];

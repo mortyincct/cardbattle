@@ -128,6 +128,7 @@ export interface ContentPack {
   enemies: EnemyDefinition[];
   relics: Record<string, RelicDefinition>;
   characters: Record<string, CharacterDefinition>;
+  events: GameEvent[];
   defaultCharacterId: string;
 }
 
@@ -191,15 +192,36 @@ export interface EventChoice {
   id: string;
   label: string;
   description: string;
-  effect: "gainGoldLoseHp" | "healGainCurse" | "upgradeRandom" | "skip" | "enterDungeon";
+  effect?: "gainGoldLoseHp" | "healGainCurse" | "upgradeRandom" | "skip" | "enterDungeon";
+  actions?: EventAction[];
   dungeonThreat?: number;
+}
+
+export type EventActionType = "gainGold" | "loseGold" | "loseHp" | "heal" | "gainMaxHp" | "loseMaxHp" | "addCard" | "addCurse" | "upgradeRandom" | "removeRandomBasic" | "transformRandomCard" | "gainRelic" | "gainThreat" | "enterDungeon" | "startEventCombat" | "skip";
+
+export interface EventAction {
+  type: EventActionType;
+  amount?: number;
+  cardId?: string;
+  relicId?: string;
+  tier?: EnemyDefinition["tier"];
+  encounterId?: string;
+  dungeonThreat?: number;
+  onWinActions?: EventAction[];
 }
 
 export interface GameEvent {
   id: string;
   title: string;
   body: string;
+  acts?: number[];
+  weight?: number;
   choices: EventChoice[];
+}
+
+export interface EventCombatContext {
+  returnNodeId: string;
+  onWinActions: EventAction[];
 }
 
 export interface DungeonContext {
@@ -228,6 +250,7 @@ export interface RunState {
   activeEvent?: GameEvent;
   shopOffer?: CardInstance[];
   dungeon?: DungeonContext;
+  eventCombat?: EventCombatContext;
   message: string;
   victory: boolean;
 }
