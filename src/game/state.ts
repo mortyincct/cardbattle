@@ -1,11 +1,14 @@
 import { cards, enemies, events, loadContentPack, normalizeContentPack } from "./content";
 import { mulberry32, pick, shuffle, uid } from "./rng";
-import type { CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
+import type { ActivePower, CardDefinition, CardFilter, CardInstance, CardZone, CombatState, ContentPack, Effect, EffectParam, EffectTarget, EnemyDefinition, EnemyMove, EnemyState, GameEvent, MapNode, NodeType, RelicTrigger, Reward, RunState, StatusEffect } from "./types";
 
 export const SAVE_KEY = "netspire-save";
-export const SAVE_VERSION = 6;
+export const SAVE_VERSION = 7;
 export const MAX_ACT = 3;
 const BOSS_NODE_COUNT = 3;
+const DUNGEON_DEFAULT_THREAT = 2;
+const DEFAULT_START_POSITION = { x: 50, y: 50 };
+type MapPosition = Pick<MapNode, "x" | "y">;
 
 export function makeCard(cardId: string, upgraded = false): CardInstance {
   return { uid: uid("card"), cardId, upgraded };
@@ -17,6 +20,11 @@ export function cardDef(card: CardInstance): CardDefinition {
 
 export function cardDefFrom(card: CardInstance, pack: ContentPack): CardDefinition {
   return pack.cards[card.cardId] ?? cards[card.cardId];
+}
+
+export function cardCostFrom(card: CardInstance, pack: ContentPack): number {
+  const def = cardDefFrom(card, pack);
+  return card.cost ?? (card.upgraded && def.upgradedCost !== undefined ? def.upgradedCost : def.cost);
 }
 
 export function newRun(seed = Date.now()): RunState {
@@ -69,16 +77,18 @@ function normalizeLoadedRun(run: RunState): RunState {
     ...run,
     rngCounter: run.rngCounter ?? 0,
     contentPack: run.contentPack ? normalizeContentPack(run.contentPack) : undefined,
-    combat: run.combat ? normalizeCombat(run.combat) : undefined
+    combat: run.combat ? normalizeCombat(run.combat) : undefined,
+    dungeon: run.dungeon
   };
 }
 
 function normalizeCombat(combat: CombatState): CombatState {
-  return { ...combat, oncePerCombatKeys: combat.oncePerCombatKeys ?? [] };
+  return { ...combat, oncePerCombatKeys: combat.oncePerCombatKeys ?? [], activePowers: combat.activePowers ?? [] };
 }
 
 function ensureCombatShape(combat: CombatState): CombatState {
   combat.oncePerCombatKeys ??= [];
+  combat.activePowers ??= [];
   return combat;
 }
 
@@ -103,6 +113,7 @@ function migrateLegacyRun(run: RunState): RunState {
     pendingReward: undefined,
     activeEvent: undefined,
     shopOffer: undefined,
+    dungeon: undefined,
     map: generateMap(mulberry32(run.seed + act * 1009), act, pack),
     rngCounter: run.rngCounter ?? 0,
     message: `第 ${act} 幕开始。选择新的路线。`
@@ -113,8 +124,9 @@ export function clearSave() {
   localStorage.removeItem(SAVE_KEY);
 }
 
-export function generateMap(random: () => number, act = 1, pack: ContentPack = loadContentPack()): MapNode[] {
-  const nodes: MapNode[] = [{ id: "start", type: "start", x: 50, y: 50, neighbors: [], completed: true, visible: true }];
+export function generateMap(random: () => number, act = 1, pack: ContentPack = loadContentPack(), startPosition: MapPosition = DEFAULT_START_POSITION): MapNode[] {
+  const start = { x: clamp(startPosition.x, 6, 94), y: clamp(startPosition.y, 6, 94) };
+  const nodes: MapNode[] = [{ id: "start", type: "start", x: start.x, y: start.y, neighbors: [], completed: true, visible: true }];
   const rings: { count: number; radius: number; variants: NodeType[] }[] = [
     { count: 8, radius: 17, variants: ["combat", "combat", "event", "treasure"] },
     { count: 12, radius: 30, variants: ["combat", "event", "elite", "shop", "treasure", "combat"] },
@@ -127,8 +139,8 @@ export function generateMap(random: () => number, act = 1, pack: ContentPack = l
       nodes.push({
         id: `ring${ringIndex}-${i}`,
         type: pick(ring.variants, random),
-        x: clamp(50 + Math.cos(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
-        y: clamp(50 + Math.sin(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
+        x: clamp(start.x + Math.cos(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
+        y: clamp(start.y + Math.sin(angle) * ring.radius + (random() - 0.5) * 2.4, 6, 94),
         neighbors: [],
         completed: false,
         visible: ringIndex === 0
@@ -137,14 +149,15 @@ export function generateMap(random: () => number, act = 1, pack: ContentPack = l
   });
   const bossPool = pack.enemies.filter((enemy) => enemy.tier === "boss");
   const bossOffset = bossPool.length ? Math.floor(random() * bossPool.length) : 0;
+  const bossPositions = bossPositionsForStart(start);
   const bossNodes = Array.from({ length: BOSS_NODE_COUNT }, (_, index) => {
     const encounter = bossPool.length ? bossPool[(bossOffset + index) % bossPool.length] : undefined;
     return {
       id: `boss-${index}`,
       type: "boss" as const,
       encounterId: encounter?.id,
-      x: [50, 8, 92][index],
-      y: [6, 82, 82][index],
+      x: bossPositions[index].x,
+      y: bossPositions[index].y,
       neighbors: [],
       completed: false,
       visible: false
@@ -178,6 +191,35 @@ export function generateMap(random: () => number, act = 1, pack: ContentPack = l
   return nodes;
 }
 
+function generateDungeonMap(random: () => number, pack: ContentPack): MapNode[] {
+  const bossPool = pack.enemies.filter((enemy) => enemy.tier === "boss");
+  const boss = bossPool.length ? pick(bossPool, random) : undefined;
+  const nodes: MapNode[] = [
+    { id: "dungeon-start", type: "start", x: 50, y: 88, neighbors: [], completed: true, visible: true },
+    { id: "dungeon-0", type: "combat", x: 32, y: 64, neighbors: [], completed: false, visible: true },
+    { id: "dungeon-1", type: random() > 0.5 ? "treasure" : "combat", x: 68, y: 64, neighbors: [], completed: false, visible: true },
+    { id: "dungeon-2", type: "elite", x: 35, y: 40, neighbors: [], completed: false, visible: false },
+    { id: "dungeon-3", type: random() > 0.5 ? "campfire" : "combat", x: 65, y: 40, neighbors: [], completed: false, visible: false },
+    { id: "dungeon-exit", type: "exit", x: 24, y: 14, neighbors: [], completed: false, visible: false },
+    { id: "dungeon-boss", type: "boss", encounterId: boss?.id, x: 76, y: 14, neighbors: [], completed: false, visible: false }
+  ];
+  const connect = (a: string, b: string) => {
+    const left = nodes.find((node) => node.id === a)!;
+    const right = nodes.find((node) => node.id === b)!;
+    if (!left.neighbors.includes(b)) left.neighbors.push(b);
+    if (!right.neighbors.includes(a)) right.neighbors.push(a);
+  };
+  connect("dungeon-start", "dungeon-0");
+  connect("dungeon-start", "dungeon-1");
+  connect("dungeon-0", "dungeon-2");
+  connect("dungeon-1", "dungeon-3");
+  connect("dungeon-2", "dungeon-exit");
+  connect("dungeon-2", "dungeon-boss");
+  connect("dungeon-3", "dungeon-exit");
+  connect("dungeon-3", "dungeon-boss");
+  return nodes;
+}
+
 export function canMove(run: RunState, nodeId: string): boolean {
   const current = run.map.find((node) => node.id === run.currentNodeId);
   const target = run.map.find((node) => node.id === nodeId);
@@ -190,7 +232,7 @@ export function moveToNode(run: RunState, nodeId: string): RunState {
   const node = next.map.find((item) => item.id === nodeId)!;
   next.currentNodeId = nodeId;
   next.movesTaken += 1;
-  next.threat += 1;
+  if (!next.dungeon) next.threat += 1;
   revealNeighbors(next, nodeId);
   if (node.completed) {
     next.message = "你穿过一处已经清理过的安静地点。";
@@ -211,6 +253,8 @@ export function moveToNode(run: RunState, nodeId: string): RunState {
   } else if (node.type === "treasure") {
     next.pendingReward = { type: "gold", amount: 65 + next.threat * 2 };
     next.screen = "treasure";
+  } else if (node.type === "exit") {
+    return leaveDungeon(next, "exit");
   }
   return next;
 }
@@ -248,7 +292,7 @@ export function startCombat(run: RunState, nodeType: NodeType): CombatState {
   const count = tier === "normal" && random() > 0.45 ? 2 : 1;
   const enemyStates = Array.from({ length: count }, () => toEnemyState(pick(candidates, random), run.threat));
   const drawPile = shuffle(run.deck.map((card) => ({ ...card })), random);
-  const combat: CombatState = { enemies: enemyStates, drawPile, hand: [], discardPile: [], exhaustPile: [], turn: 1, log: ["抽取起始手牌。"], oncePerCombatKeys: [] };
+  const combat: CombatState = { enemies: enemyStates, drawPile, hand: [], discardPile: [], exhaustPile: [], turn: 1, log: ["抽取起始手牌。"], oncePerCombatKeys: [], activePowers: [] };
   const next = { ...run, combat };
   drawCards(next, combat, 5, random);
   applyTriggeredEffects(next, "combatStart", { source: "character", sourceOwner: next.player, random });
@@ -278,13 +322,14 @@ function toEnemyState(enemy: EnemyDefinition, threat: number): EnemyState {
 
 export function playCard(run: RunState, cardUid: string, targetEnemyId?: string): RunState {
   if (!run.combat || run.screen !== "combat") return run;
+  if (run.combat.pendingCardChoice) return run;
   const next = clone(run);
   const combat = ensureCombatShape(next.combat!);
   const index = combat.hand.findIndex((card) => card.uid === cardUid);
   if (index < 0) return run;
   const card = combat.hand[index];
   const def = cardDefFrom(card, getContentPack(next));
-  const cost = card.cost ?? def.cost;
+  const cost = cardCostFrom(card, getContentPack(next));
   if (def.type === "status" || def.type === "curse" || next.player.energy < cost) return run;
   const target = targetEnemyId ? combat.enemies.find((enemy) => enemy.instanceId === targetEnemyId) : combat.enemies[0];
   next.player.energy -= cost;
@@ -292,21 +337,198 @@ export function playCard(run: RunState, cardUid: string, targetEnemyId?: string)
   const effects = card.upgraded ? def.upgradedEffects : def.effects;
   const random = consumeRunRandom(next, 3000 + combat.turn);
   resolveEffects(next, effects, { source: "card", sourceOwner: next.player, selectedEnemy: target, card, random });
-  applyTriggeredEffects(next, "cardPlayed", { source: "card", sourceOwner: next.player, selectedEnemy: target, card, random });
-  if (def.id === "harvest" && target && target.hp <= 0) next.player.gold += card.upgraded ? 12 : 8;
-  removeDeadEnemies(next);
+  if (combat.pendingCardChoice) return autoCompleteEmptyCardChoice(next);
+  return finishPlayedCard(next, card, target?.instanceId, random);
+}
+
+export function completeCardChoice(run: RunState, selectedUids: string[]): RunState {
+  if (!run.combat?.pendingCardChoice || run.screen !== "combat") return run;
+  const next = clone(run);
+  const combat = ensureCombatShape(next.combat!);
+  const choice = combat.pendingCardChoice!;
+  const selected = new Set(selectedUids.slice(0, choice.amount));
+  const from = getZone(next, choice.fromZone);
+  const to = getZone(next, choice.toZone);
+  const moved: CardInstance[] = [];
+  for (let i = from.length - 1; i >= 0; i -= 1) {
+    const selectedCard = from[i];
+    if (!selected.has(selectedCard.uid) || !cardMatches(next, selectedCard, choice.cardFilter)) continue;
+    moved.unshift(...from.splice(i, 1));
+  }
+  to.push(...moved);
+  combat.pendingCardChoice = undefined;
+  pushCombatLog(next, `${choice.toZone === "exhaustPile" ? "消耗" : "弃掉"} ${moved.length} 张牌。`);
+  const target = choice.targetEnemyId ? combat.enemies.find((enemy) => enemy.instanceId === choice.targetEnemyId) : undefined;
+  return finishPlayedCard(next, choice.sourceCard, target?.instanceId);
+}
+
+function autoCompleteEmptyCardChoice(run: RunState): RunState {
+  const choice = run.combat?.pendingCardChoice;
+  if (!choice) return run;
+  const candidates = getZone(run, choice.fromZone).filter((card) => cardMatches(run, card, choice.cardFilter));
+  if (candidates.length > 0 && choice.amount > 0) return run;
+  return completeCardChoice(run, []);
+}
+
+function finishPlayedCard(run: RunState, card: CardInstance, targetEnemyId?: string, random?: () => number): RunState {
+  const combat = ensureCombatShape(run.combat!);
+  const def = cardDefFrom(card, getContentPack(run));
+  const target = targetEnemyId ? combat.enemies.find((enemy) => enemy.instanceId === targetEnemyId) : combat.enemies[0];
+  applyPowerCardRepeats(run, def, card, target, random);
+  if (combat.pendingCardChoice) return autoCompleteEmptyCardChoice(run);
+  applyTriggeredEffects(run, "cardPlayed", { source: "card", sourceOwner: run.player, selectedEnemy: target, card, random });
+  applyPowerCardPlayed(run, def);
+  activateCombatPower(run, def, card);
+  if (def.id === "harvest" && target && target.hp <= 0) run.player.gold += card.upgraded ? 12 : 8;
+  removeDeadEnemies(run);
   if (def.exhaust || def.type === "power") combat.exhaustPile.push(card);
   else combat.discardPile.push(card);
-  pushCombatLog(next, `打出 ${def.name}${card.upgraded ? "+" : ""}。`);
-  if (combat.enemies.length === 0) return winCombat(next);
-  return next;
+  pushCombatLog(run, `打出 ${def.name}${card.upgraded ? "+" : ""}。`);
+  if (combat.enemies.length === 0) return winCombat(run);
+  return run;
+}
+
+function activateCombatPower(run: RunState, def: CardDefinition, card: CardInstance) {
+  if (def.type !== "power" || !run.combat || !ongoingPowerIds.has(def.id)) return;
+  const combat = ensureCombatShape(run.combat);
+  combat.activePowers!.push({ id: def.id, cardId: card.cardId, upgraded: card.upgraded, counters: {} });
+  pushCombatLog(run, `${def.name} 生效。`);
+}
+
+const ongoingPowerIds = new Set([
+  "rhythm_engine",
+  "skill_echo",
+  "assault_echo",
+  "mana_cascade",
+  "null_brand",
+  "iron_habit",
+  "blue_habit",
+  "cruel_meter",
+  "dawn_ledger"
+]);
+
+function powerCount(combat: CombatState, id: string) {
+  return (combat.activePowers ?? []).filter((power) => power.id === id).length;
+}
+
+function forEachPower(run: RunState, id: string, callback: (power: ActivePower) => void) {
+  ensureCombatShape(run.combat!);
+  run.combat!.activePowers!.filter((power) => power.id === id).forEach(callback);
+}
+
+function applyPowerCardPlayed(run: RunState, def: CardDefinition) {
+  forEachPower(run, "rhythm_engine", (power) => {
+    const threshold = power.upgraded ? 5 : 6;
+    power.counters.cardsPlayed = (power.counters.cardsPlayed ?? 0) + 1;
+    if (power.counters.cardsPlayed >= threshold) {
+      power.counters.cardsPlayed -= threshold;
+      run.player.energy += 1;
+      pushCombatLog(run, "节奏引擎回复 1 点能量。");
+    }
+  });
+}
+
+function applyPowerCardRepeats(run: RunState, def: CardDefinition, card: CardInstance, target: EnemyState | undefined, random?: () => number) {
+  if (def.type === "skill") {
+    forEachPower(run, "skill_echo", (power) => {
+      if ((power.counters.skillRepeatsThisTurn ?? 0) >= 1) return;
+      power.counters.skillRepeatsThisTurn = (power.counters.skillRepeatsThisTurn ?? 0) + 1;
+      resolveEffects(run, card.upgraded ? def.upgradedEffects : def.effects, { source: "card", sourceOwner: run.player, selectedEnemy: target, card, random });
+      pushCombatLog(run, "技能回响重复了这张技能牌。");
+    });
+  }
+  if (def.type === "attack") {
+    forEachPower(run, "assault_echo", (power) => {
+      const limit = power.upgraded ? 2 : 1;
+      if ((power.counters.attackRepeatsThisTurn ?? 0) >= limit) return;
+      power.counters.attackRepeatsThisTurn = (power.counters.attackRepeatsThisTurn ?? 0) + 1;
+      resolveEffects(run, card.upgraded ? def.upgradedEffects : def.effects, { source: "card", sourceOwner: run.player, selectedEnemy: target, card, random });
+      pushCombatLog(run, "攻击回响重复了这张攻击牌。");
+    });
+  }
+}
+
+function applyPowerTurnEnd(run: RunState) {
+  forEachPower(run, "iron_habit", (power) => {
+    run.player.physicalArmor += power.upgraded ? 4 : 3;
+  });
+  forEachPower(run, "blue_habit", () => {
+    run.player.magicArmor += 3;
+  });
+}
+
+function resetPowerTurnCounters(run: RunState) {
+  if (!run.combat) return;
+  ensureCombatShape(run.combat);
+  run.combat.activePowers!.forEach((power) => {
+    delete power.counters.skillRepeatsThisTurn;
+    delete power.counters.attackRepeatsThisTurn;
+    delete power.counters.magicDamageThisTurn;
+    Object.keys(power.counters).filter((key) => key.startsWith("physicalHits:") || key.startsWith("magicHits:")).forEach((key) => delete power.counters[key]);
+  });
+}
+
+function restoreTemporaryEnemyMagic(run: RunState) {
+  if (!run.combat) return;
+  const combat = ensureCombatShape(run.combat);
+  combat.activePowers!.forEach((power) => {
+    Object.entries(power.counters).forEach(([key, amount]) => {
+      if (!key.startsWith("tempMagicLoss:") || amount <= 0) return;
+      const enemyId = key.slice("tempMagicLoss:".length);
+      const enemy = combat.enemies.find((item) => item.instanceId === enemyId);
+      if (enemy) {
+        addStatus(enemy.statuses, "magic", amount);
+        pruneStatuses(enemy.statuses);
+      }
+      delete power.counters[key];
+    });
+  });
+}
+
+function applyPowerDamageDealt(run: RunState, enemy: EnemyState, loss: number, kind: Exclude<DamageKind, "true">) {
+  if (!run.combat) return;
+  if (kind === "physical") {
+    forEachPower(run, "null_brand", (power) => {
+      addStatus(enemy.statuses, "magic", -1);
+      const key = `tempMagicLoss:${enemy.instanceId}`;
+      power.counters[key] = (power.counters[key] ?? 0) + 1;
+    });
+    forEachPower(run, "cruel_meter", (power) => {
+      const key = `physicalHits:${enemy.instanceId}`;
+      power.counters[key] = (power.counters[key] ?? 0) + 1;
+      if (power.counters[key] >= 2) {
+        power.counters[key] -= 2;
+        addStatus(enemy.statuses, "vulnerable", 1);
+      }
+    });
+  }
+  if (kind === "magic") {
+    forEachPower(run, "mana_cascade", (power) => {
+      power.counters.magicDamageThisTurn = (power.counters.magicDamageThisTurn ?? 0) + loss;
+      while (power.counters.magicDamageThisTurn >= 50) {
+        power.counters.magicDamageThisTurn -= 50;
+        run.player.energy += 1;
+        drawCards(run, run.combat!, power.upgraded ? 3 : 2, consumeRunRandom(run, 8200 + run.combat!.turn));
+      }
+    });
+    forEachPower(run, "cruel_meter", (power) => {
+      const key = `magicHits:${enemy.instanceId}`;
+      power.counters[key] = (power.counters[key] ?? 0) + 1;
+      if (power.counters[key] >= 2) {
+        power.counters[key] -= 2;
+        addStatus(enemy.statuses, "weak", 1);
+      }
+    });
+  }
 }
 
 export function endTurn(run: RunState): RunState {
   if (!run.combat || run.screen !== "combat") return run;
+  if (run.combat.pendingCardChoice) return run;
   const next = clone(run);
   const combat = ensureCombatShape(next.combat!);
   applyTriggeredEffects(next, "turnEnd", { source: "character", sourceOwner: next.player, random: consumeRunRandom(next, 7100 + combat.turn) });
+  applyPowerTurnEnd(next);
   applyTurnEndStatuses(next, next.player);
   discardHandAtTurnEnd(next);
   const enemyRandom = consumeRunRandom(next, 4000 + combat.turn);
@@ -319,6 +541,7 @@ export function endTurn(run: RunState): RunState {
     applyTurnEndStatuses(next, enemy);
     removeDeadEnemies(next);
   });
+  restoreTemporaryEnemyMagic(next);
   if (next.player.hp <= 0) {
     next.screen = "gameover";
     next.message = "织网收拢。你倒下了。";
@@ -335,13 +558,14 @@ export function endTurn(run: RunState): RunState {
   next.player.physicalArmor = 0;
   next.player.energy = next.player.maxEnergy;
   combat.turn += 1;
+  resetPowerTurnCounters(next);
   applyTurnStartStatuses(next, next.player);
   if (next.player.hp <= 0) {
     next.screen = "gameover";
     next.message = "织网收拢。你倒下了。";
     return next;
   }
-  drawCards(next, combat, 5, consumeRunRandom(next, 2000 + combat.turn));
+  drawCards(next, combat, 5 + powerCount(combat, "dawn_ledger"), consumeRunRandom(next, 2000 + combat.turn));
   applyTriggeredEffects(next, "turnStart", { source: "character", sourceOwner: next.player });
   pushCombatLog(next, `第 ${combat.turn} 回合开始。`);
   return next;
@@ -366,6 +590,7 @@ function winCombat(run: RunState): RunState {
   applyTriggeredEffects(run, "combatWon", { source: "character", sourceOwner: run.player });
   const node = run.map.find((item) => item.id === run.currentNodeId);
   if (node?.type === "boss") {
+    if (run.dungeon) return leaveDungeon(run, "boss");
     return run.act < MAX_ACT ? advanceAct(run) : winRun(run);
   }
   run.player.physicalArmor = 0;
@@ -380,6 +605,8 @@ function winCombat(run: RunState): RunState {
 }
 
 function advanceAct(run: RunState): RunState {
+  const previousBoss = run.map.find((item) => item.id === run.currentNodeId);
+  const nextStart = previousBoss ? { x: previousBoss.x, y: previousBoss.y } : DEFAULT_START_POSITION;
   run.act += 1;
   run.player.physicalArmor = 0;
   run.player.magicArmor = 0;
@@ -390,7 +617,7 @@ function advanceAct(run: RunState): RunState {
   run.shopOffer = undefined;
   run.screen = "map";
   run.currentNodeId = "start";
-  run.map = generateMap(mulberry32(run.seed + run.act * 1009), run.act, getContentPack(run));
+  run.map = generateMap(mulberry32(run.seed + run.act * 1009), run.act, getContentPack(run), nextStart);
   run.message = `第 ${run.act} 幕开始。选择新的路线。`;
   return run;
 }
@@ -407,8 +634,16 @@ export function chooseRewardCard(run: RunState, cardUid?: string): RunState {
   if (!run.pendingReward || run.screen !== "reward") return run;
   const next = clone(run);
   const chosen = cardUid ? next.pendingReward!.cards?.find((card) => card.uid === cardUid) : undefined;
+  const relicId = next.pendingReward?.relicId;
+  const relic = relicId ? getContentPack(next).relics[relicId] : undefined;
   if (chosen) next.deck.push(chosen);
-  next.message = chosen ? `${cardDef(chosen).name} 加入牌组。` : "你跳过了卡牌奖励。";
+  if (relicId && !next.relics.includes(relicId)) next.relics.push(relicId);
+  if (next.pendingReward?.source === "dungeonBoss") {
+    const cardText = chosen ? `${cardDef(chosen).name} 加入牌组` : "跳过卡牌";
+    next.message = relic ? `${cardText}。宝箱中获得 ${relic.name}。` : `${cardText}。副本宝箱已经清空。`;
+  } else {
+    next.message = chosen ? `${cardDef(chosen).name} 加入牌组。` : "你跳过了卡牌奖励。";
+  }
   return completeNode(next);
 }
 
@@ -433,9 +668,57 @@ export function applyEventChoice(run: RunState, choiceId: string): RunState {
     next.deck.push(makeCard("curse"));
   } else if (choice.effect === "upgradeRandom") {
     upgradeRandom(next);
+  } else if (choice.effect === "enterDungeon") {
+    return enterDungeon(next, choice.dungeonThreat ?? DUNGEON_DEFAULT_THREAT);
   }
   next.message = choice.description;
   return completeNode(next);
+}
+
+function enterDungeon(run: RunState, threatIncrease: number): RunState {
+  if (run.dungeon) return run;
+  run.dungeon = {
+    returnMap: clone(run.map),
+    returnNodeId: run.currentNodeId,
+    threatIncrease: Math.max(0, threatIncrease)
+  };
+  run.map = generateDungeonMap(mulberry32(run.seed + run.act * 7919 + run.movesTaken * 313 + run.threat * 17), getContentPack(run));
+  run.currentNodeId = "dungeon-start";
+  run.screen = "map";
+  run.combat = undefined;
+  run.pendingReward = undefined;
+  run.activeEvent = undefined;
+  run.shopOffer = undefined;
+  run.message = `进入副本。完成后威胁 +${run.dungeon.threatIncrease}。`;
+  return run;
+}
+
+function leaveDungeon(run: RunState, reason: "exit" | "boss"): RunState {
+  const dungeon = run.dungeon;
+  if (!dungeon) return run;
+  const threatIncrease = dungeon.threatIncrease;
+  run.map = clone(dungeon.returnMap);
+  run.currentNodeId = dungeon.returnNodeId;
+  run.dungeon = undefined;
+  run.threat += threatIncrease;
+  run.combat = undefined;
+  run.activeEvent = undefined;
+  run.shopOffer = undefined;
+  if (reason === "exit") {
+    run.pendingReward = undefined;
+    run.screen = "map";
+    run.message = `你离开副本，威胁 +${threatIncrease}。`;
+    return completeNode(run);
+  }
+  run.player.physicalArmor = 0;
+  run.player.magicArmor = 0;
+  run.player.statuses = run.player.statuses.filter((status) => ["strength", "magic", "dexterity", "thorns"].includes(status.id));
+  const goldReward = 45 + run.threat * 2;
+  run.player.gold += goldReward;
+  run.pendingReward = { type: "card", cards: makeRewardCards(run, 3), amount: goldReward, source: "dungeonBoss", relicId: pickAvailableRelic(run) };
+  run.screen = "reward";
+  run.message = `副本首领倒下。威胁 +${threatIncrease}，获得 ${goldReward} 金币。`;
+  return run;
 }
 
 export function restAtCampfire(run: RunState, action: "heal" | "upgrade"): RunState {
@@ -488,6 +771,12 @@ function makeRewardCards(run: RunState, amount: number): CardInstance[] {
   return Array.from({ length: amount }, () => makeCard(pick(rewardCardPool, random).id, random() > 0.88));
 }
 
+function pickAvailableRelic(run: RunState): string | undefined {
+  const random = mulberry32(run.seed + run.movesTaken * 991 + run.threat * 37);
+  const candidates = Object.values(getContentPack(run).relics).filter((relic) => relic.rarity !== "basic" && !run.relics.includes(relic.id));
+  return candidates.length ? pick(candidates, random).id : undefined;
+}
+
 function drawCards(run: RunState, combat: CombatState, amount: number, random: () => number) {
   for (let i = 0; i < amount; i += 1) {
     if (combat.drawPile.length === 0) {
@@ -504,7 +793,7 @@ function drawCards(run: RunState, combat: CombatState, amount: number, random: (
 
 type DamageKind = "physical" | "magic" | "true";
 
-function damageEnemy(run: RunState, enemy: EnemyState, amount: number, kind: DamageKind = "true") {
+function damageEnemy(run: RunState, enemy: EnemyState, amount: number, kind: DamageKind = "true", source: EffectSource = "status") {
   const armorKey = kind === "magic" ? "magicArmor" : "physicalArmor";
   const blocked = kind === "true" ? 0 : Math.min(enemy[armorKey], amount);
   if (kind !== "true") enemy[armorKey] -= blocked;
@@ -512,6 +801,7 @@ function damageEnemy(run: RunState, enemy: EnemyState, amount: number, kind: Dam
   enemy.hp -= loss;
   if (loss > 0 || blocked > 0) pushCombatLog(run, `${enemy.name} 受到 ${loss} 点${damageKindLabel(kind)}伤害${blocked > 0 ? `，${blocked} 点被护甲抵消` : ""}。`);
   afterDamage(run, enemy, loss, kind);
+  if (source === "card" && loss > 0 && (kind === "physical" || kind === "magic")) applyPowerDamageDealt(run, enemy, loss, kind);
   return loss;
 }
 
@@ -639,6 +929,12 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function bossPositionsForStart(start: MapPosition): MapPosition[] {
+  const positions = [{ x: 50, y: 6 }, { x: 8, y: 82 }, { x: 92, y: 82 }];
+  const replacements = [{ x: 50, y: 94 }, { x: 92, y: 18 }, { x: 8, y: 18 }];
+  return positions.map((position, index) => (distance(position, start) < 8 ? replacements[index] : position));
+}
+
 function distance(a: Pick<MapNode, "x" | "y">, b: Pick<MapNode, "x" | "y">) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -702,7 +998,8 @@ function nodeTypeLabel(type: NodeType) {
     campfire: "营火",
     shop: "商店",
     treasure: "宝箱",
-    boss: "首领"
+    boss: "首领",
+    exit: "出口"
   };
   return labels[type];
 }
@@ -745,11 +1042,14 @@ function applyTriggeredEffects(run: RunState, trigger: RelicTrigger, context: Re
 }
 
 function resolveEffects(run: RunState, effects: Effect[], context: ResolveContext) {
-  effects.forEach((effect) => {
-    if (!conditionMet(run, effect.condition, context)) return;
+  for (const effect of effects) {
+    if (!conditionMet(run, effect.condition, context)) continue;
     const repeats = effect.times ?? 1;
-    for (let i = 0; i < repeats; i += 1) applyParamOperation(run, effect, context);
-  });
+    for (let i = 0; i < repeats; i += 1) {
+      applyParamOperation(run, effect, context);
+      if (run.combat?.pendingCardChoice) return;
+    }
+  }
 }
 
 function applyParamOperation(run: RunState, effect: Effect, context: ResolveContext) {
@@ -798,12 +1098,12 @@ function applyCombatantParam(run: RunState, target: EffectOwner, effect: Effect,
     const source = context.sourceOwner && isCombatant(context.sourceOwner) ? context.sourceOwner : undefined;
     const kind = effect.param === "magicDamage" ? "magic" : "physical";
     const adjusted = adjustDamage(amount, source, target, kind);
-    if (isEnemy(target)) damageEnemy(run, target, adjusted, kind);
+    if (isEnemy(target)) damageEnemy(run, target, adjusted, kind, context.source);
     else damagePlayer(run, adjusted, source && isEnemy(source) ? source : undefined, kind);
     return;
   }
   if (effect.param === "hp" && effect.op === "subtract") {
-    if (isEnemy(target)) damageEnemy(run, target, amount, "true");
+    if (isEnemy(target)) damageEnemy(run, target, amount, "true", context.source);
     else damagePlayer(run, amount, context.sourceOwner && isEnemy(context.sourceOwner) ? context.sourceOwner : undefined, "true");
     return;
   }
@@ -840,6 +1140,17 @@ function applyCardOperation(run: RunState, effect: Effect, context: ResolveConte
   if (!run.combat && effect.fromZone !== "deck" && effect.toZone !== "deck") return;
   const amount = effect.amount ?? 1;
   if (effect.op === "move" && effect.fromZone && effect.toZone) {
+    if (effect.selection === "manual" && effect.fromZone === "hand" && run.combat && context.card) {
+      run.combat.pendingCardChoice = {
+        sourceCard: context.card!,
+        targetEnemyId: context.selectedEnemy?.instanceId,
+        fromZone: effect.fromZone,
+        toZone: effect.toZone,
+        amount,
+        cardFilter: effect.cardFilter ?? "any"
+      };
+      return;
+    }
     if (effect.fromZone === "drawPile" && effect.toZone === "hand" && run.combat) {
       drawCards(run, run.combat, amount, context.random ?? consumeRunRandom(run, 6000 + run.combat.turn));
       return;

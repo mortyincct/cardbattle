@@ -1,6 +1,6 @@
 export type CardType = "attack" | "skill" | "power" | "status" | "curse";
 export type Rarity = "basic" | "common" | "uncommon" | "rare";
-export type NodeType = "start" | "combat" | "elite" | "event" | "campfire" | "shop" | "treasure" | "boss";
+export type NodeType = "start" | "combat" | "elite" | "event" | "campfire" | "shop" | "treasure" | "boss" | "exit";
 export type Screen = "menu" | "map" | "combat" | "reward" | "event" | "shop" | "campfire" | "treasure" | "gameover";
 export type EffectTrigger = "runStart" | "combatStart" | "turnStart" | "turnEnd" | "cardPlayed" | "beforeDamageTaken" | "playerDamaged" | "enemyKilled" | "combatWon" | "cardDrawn" | "statusApplied";
 export type RelicTrigger = EffectTrigger;
@@ -9,6 +9,7 @@ export type EffectParam = "hp" | "maxHp" | "physicalDamage" | "magicDamage" | "p
 export type EffectOperation = "add" | "subtract" | "set" | "multiply" | "move" | "create" | "remove" | "clear";
 export type CardZone = "drawPile" | "hand" | "discardPile" | "exhaustPile" | "deck";
 export type CardFilter = "any" | CardType | Rarity | "upgraded" | "notUpgraded";
+export type CardSelectionMode = "manual";
 export type ConditionOperator = "equals" | "notEquals" | "greaterThan" | "greaterThanOrEqual" | "lessThan" | "lessThanOrEqual";
 
 export interface EffectCondition {
@@ -28,6 +29,7 @@ export interface Effect {
   fromZone?: CardZone;
   toZone?: CardZone;
   cardFilter?: CardFilter;
+  selection?: CardSelectionMode;
   times?: number;
   condition?: EffectCondition;
 }
@@ -45,6 +47,7 @@ export interface CardDefinition {
   type: CardType;
   rarity: Rarity;
   cost: number;
+  upgradedCost?: number;
   description: string;
   upgradedDescription: string;
   effects: Effect[];
@@ -58,6 +61,22 @@ export interface CardInstance {
   cardId: string;
   upgraded: boolean;
   cost?: number;
+}
+
+export interface PendingCardChoice {
+  sourceCard: CardInstance;
+  targetEnemyId?: string;
+  fromZone: CardZone;
+  toZone: CardZone;
+  amount: number;
+  cardFilter: CardFilter;
+}
+
+export interface ActivePower {
+  id: string;
+  cardId: string;
+  upgraded: boolean;
+  counters: Record<string, number>;
 }
 
 export interface StatusEffect {
@@ -156,19 +175,24 @@ export interface CombatState {
   turn: number;
   log: string[];
   oncePerCombatKeys: string[];
+  pendingCardChoice?: PendingCardChoice;
+  activePowers?: ActivePower[];
 }
 
 export interface Reward {
   type: "card" | "gold" | "heal" | "remove";
   cards?: CardInstance[];
   amount?: number;
+  source?: "combat" | "dungeonBoss";
+  relicId?: string;
 }
 
 export interface EventChoice {
   id: string;
   label: string;
   description: string;
-  effect: "gainGoldLoseHp" | "healGainCurse" | "upgradeRandom" | "skip";
+  effect: "gainGoldLoseHp" | "healGainCurse" | "upgradeRandom" | "skip" | "enterDungeon";
+  dungeonThreat?: number;
 }
 
 export interface GameEvent {
@@ -176,6 +200,12 @@ export interface GameEvent {
   title: string;
   body: string;
   choices: EventChoice[];
+}
+
+export interface DungeonContext {
+  returnMap: MapNode[];
+  returnNodeId: string;
+  threatIncrease: number;
 }
 
 export interface RunState {
@@ -197,6 +227,7 @@ export interface RunState {
   pendingReward?: Reward;
   activeEvent?: GameEvent;
   shopOffer?: CardInstance[];
+  dungeon?: DungeonContext;
   message: string;
   victory: boolean;
 }

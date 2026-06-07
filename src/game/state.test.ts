@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyEventChoice, buyFromShop, chooseRewardCard, claimTreasure, clearSave, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, restAtCampfire, saveRun, SAVE_KEY, SAVE_VERSION, scaleEnemy, shopService, startCombat } from "./state";
+import { applyEventChoice, buyFromShop, chooseRewardCard, claimTreasure, clearSave, completeCardChoice, endTurn, loadRun, MAX_ACT, moveToNode, newRun, playCard, restAtCampfire, saveRun, SAVE_KEY, SAVE_VERSION, scaleEnemy, shopService, startCombat } from "./state";
 import { clearContentDraft, CONTENT_DRAFT_KEY, defaultContentPack, enemies, loadContentPack, normalizeContentPack, saveContentDraft, validateContentPack } from "./content";
 import type { Effect, EnemyState, EventChoice, RunState, StatusEffect } from "./types";
 
@@ -7,6 +7,18 @@ beforeEach(() => {
   localStorage.removeItem(CONTENT_DRAFT_KEY);
   localStorage.removeItem(SAVE_KEY);
 });
+
+const expansionCardIds = [
+  "iron_jab", "ember_prick", "snap_guard", "glass_ward", "omen_pebble", "nick_and_read", "venom_dot", "thorn_hint", "straight_cut", "bitter_spark",
+  "brace_up", "blue_barrier", "blind_hex", "open_wound", "toxic_sting", "thorn_wrap", "read_the_ash", "cut_and_cover", "spell_prick", "warded_step",
+  "mirror_breath", "thin_venom", "shatter_sign", "barb_stance", "twin_cut", "ember_slash", "heavy_swing", "cinder_bolt", "shield_raise", "mana_bastion",
+  "wide_sweep", "arc_wave", "double_guard", "venom_brand", "weakening_blow", "exposed_spark", "crushing_arc", "storm_lance", "wall_of_bones", "night_fog",
+  "free_flurry", "bloodless_bargain", "quick_venom", "silent_reading", "iron_rhythm", "hexing_cut", "venom_guard", "arcane_flow", "thorn_prayer", "exposed_line",
+  "dusk_needles", "veil_cut", "low_sun", "sweeping_hook", "boiling_rune", "plated_thorns", "toxic_opening", "ash_bulwark", "mind_splinter", "red_needle",
+  "script_of_teeth", "split_pressure", "black_salve", "cinder_circle", "grave_sweep", "cruel_lesson", "nest_of_barbs", "venom_weather", "mirror_citadel", "eclipse_gate",
+  "zero_hour", "demon_grin", "perfect_cut", "silent_plague", "red_math", "lunar_edict", "crown_crack", "thorn_engine", "venom_contract", "twin_sanction",
+  "final_argument", "astral_collapse", "black_bastion", "all_teeth", "plague_star", "omen_engine", "godless_sweep", "void_lantern", "collar_of_ruin", "night_judgment"
+] as const;
 
 describe("map movement", () => {
   it("only allows movement to visible neighboring nodes and raises threat", () => {
@@ -146,6 +158,7 @@ describe("combat flow", () => {
     expect(run.act).toBe(2);
     expect(run.screen).toBe("map");
     expect(run.currentNodeId).toBe("start");
+    expect(run.map.find((node) => node.id === "start")).toMatchObject({ x: boss.x, y: boss.y });
     expect(run.deck).toHaveLength(originalDeckSize);
     expect(run.player.gold).toBe(originalGold);
     expect(run.threat).toBe(9);
@@ -153,6 +166,7 @@ describe("combat flow", () => {
     expect(run.player.magicArmor).toBe(0);
     expect(run.pendingReward).toBeUndefined();
     expect(run.map.filter((node) => node.type === "boss")).toHaveLength(3);
+    expect(run.map.find((node) => node.id === "start")?.neighbors.length).toBeGreaterThan(0);
   });
 
   it("wins the run after defeating an act 3 boss", () => {
@@ -244,6 +258,99 @@ describe("combat flow", () => {
     const secondNext = playCard(second, "card-1");
 
     expect(firstNext.combat?.enemies.map((enemy) => enemy.hp)).toEqual(secondNext.combat?.enemies.map((enemy) => enemy.hp));
+  });
+
+  it("pauses for manual discard choices and completes the played card after selection", () => {
+    let run = makeCombatRun("test_manual_discard", [{ target: "player", param: "cards", op: "move", amount: 1, fromZone: "hand", toZone: "discardPile", selection: "manual" }]);
+    run.combat!.hand.push({ uid: "other-1", cardId: "guard", upgraded: false }, { uid: "other-2", cardId: "spark", upgraded: false });
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.combat?.pendingCardChoice?.sourceCard.uid).toBe("card-1");
+    expect(run.combat?.hand.map((card) => card.uid)).toEqual(["other-1", "other-2"]);
+    expect(run.combat?.discardPile).toHaveLength(0);
+
+    run = completeCardChoice(run, ["other-2"]);
+
+    expect(run.combat?.pendingCardChoice).toBeUndefined();
+    expect(run.combat?.discardPile.map((card) => card.uid)).toEqual(["other-2", "card-1"]);
+    expect(run.combat?.hand.map((card) => card.uid)).toEqual(["other-1"]);
+  });
+
+  it("auto-completes manual choices when no other hand cards are available", () => {
+    let run = makeCombatRun("test_empty_manual_discard", [{ target: "player", param: "cards", op: "move", amount: 1, fromZone: "hand", toZone: "discardPile", selection: "manual" }]);
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.combat?.pendingCardChoice).toBeUndefined();
+    expect(run.combat?.discardPile.map((card) => card.uid)).toEqual(["card-1"]);
+  });
+
+  it("saves and loads pending manual card choices", () => {
+    let run = makeCombatRun("test_saved_manual_discard", [{ target: "player", param: "cards", op: "move", amount: 1, fromZone: "hand", toZone: "discardPile", selection: "manual" }]);
+    run.combat!.hand.push({ uid: "other-1", cardId: "guard", upgraded: false });
+    run = playCard(run, "card-1", "enemy-1");
+
+    saveRun(run);
+    const loaded = loadRun();
+
+    expect(loaded?.combat?.pendingCardChoice?.sourceCard.uid).toBe("card-1");
+    expect(loaded?.combat?.hand.map((card) => card.uid)).toEqual(["other-1"]);
+  });
+
+  it("applies ongoing powers for card cadence and repeated cards", () => {
+    let cadence = makeDefaultCardRun(["snap_guard", "snap_guard", "snap_guard", "snap_guard", "snap_guard", "snap_guard"]);
+    cadence.player.energy = 0;
+    cadence.combat!.activePowers = [{ id: "rhythm_engine", cardId: "rhythm_engine", upgraded: false, counters: {} }];
+    for (const card of [...cadence.combat!.hand]) cadence = playCard(cadence, card.uid, "enemy-1");
+    expect(cadence.player.energy).toBe(1);
+
+    let skillRepeat = makeDefaultCardRun(["guard"]);
+    skillRepeat.combat!.activePowers = [{ id: "skill_echo", cardId: "skill_echo", upgraded: false, counters: {} }];
+    skillRepeat = playCard(skillRepeat, "card-1", "enemy-1");
+    expect(skillRepeat.player.physicalArmor).toBe(10);
+
+    let attackRepeat = makeDefaultCardRun(["strike"]);
+    attackRepeat.combat!.activePowers = [{ id: "assault_echo", cardId: "assault_echo", upgraded: false, counters: {} }];
+    attackRepeat = playCard(attackRepeat, "card-1", "enemy-1");
+    expect(attackRepeat.combat?.enemies[0].hp).toBe(18);
+  });
+
+  it("applies damage-count and magic-damage ongoing powers", () => {
+    let magicRun = makeCombatRun("test_big_magic", [{ target: "selectedEnemy", param: "magicDamage", op: "subtract", amount: 50 }]);
+    magicRun.combat!.enemies[0].hp = 100;
+    magicRun.combat!.enemies[0].maxHp = 100;
+    magicRun.combat!.drawPile = [{ uid: "draw-1", cardId: "guard", upgraded: false }, { uid: "draw-2", cardId: "spark", upgraded: false }, { uid: "draw-3", cardId: "ward", upgraded: false }];
+    magicRun.combat!.activePowers = [{ id: "mana_cascade", cardId: "mana_cascade", upgraded: true, counters: {} }];
+    const energyBefore = magicRun.player.energy;
+    magicRun = playCard(magicRun, "card-1", "enemy-1");
+    expect(magicRun.player.energy).toBe(energyBefore + 1);
+    expect(magicRun.combat?.hand.map((card) => card.uid)).toContain("draw-3");
+
+    let hitRun = makeDefaultCardRun(["twin_cut"]);
+    hitRun.combat!.enemies[0].statuses = [{ id: "magic", amount: 3 }];
+    hitRun.combat!.activePowers = [
+      { id: "null_brand", cardId: "null_brand", upgraded: false, counters: {} },
+      { id: "cruel_meter", cardId: "cruel_meter", upgraded: false, counters: {} }
+    ];
+    hitRun = playCard(hitRun, "card-1", "enemy-1");
+    expect(hitRun.combat?.enemies[0].statuses).toContainEqual({ id: "magic", amount: 1 });
+    expect(hitRun.combat?.enemies[0].statuses).toContainEqual({ id: "vulnerable", amount: 1 });
+  });
+
+  it("applies turn-end armor powers and dawn draw bonus", () => {
+    let run = makeDefaultCardRun([]);
+    run.combat!.drawPile = Array.from({ length: 6 }, (_, index) => ({ uid: `draw-${index}`, cardId: "guard", upgraded: false }));
+    run.combat!.enemies[0].intent = { id: "wait", intent: "defend", label: "Wait", effects: [] };
+    run.combat!.activePowers = [
+      { id: "blue_habit", cardId: "blue_habit", upgraded: false, counters: {} },
+      { id: "dawn_ledger", cardId: "dawn_ledger", upgraded: false, counters: {} }
+    ];
+
+    run = endTurn(run);
+
+    expect(run.player.magicArmor).toBe(3);
+    expect(run.combat?.hand).toHaveLength(6);
   });
 
   it("records combat log entries and keeps the log capped", () => {
@@ -527,6 +634,7 @@ describe("saves", () => {
     expect(loaded?.saveVersion).toBe(SAVE_VERSION);
     expect(loaded?.act).toBe(1);
     expect(loaded?.rngCounter).toBe(0);
+    expect(loaded?.dungeon).toBeUndefined();
   });
 
   it("adds once-per-combat tracking to current saves with older combat objects", () => {
@@ -665,11 +773,111 @@ describe("events, campfires, shops, and treasure", () => {
     expect(next.pendingReward).toBeUndefined();
     expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
   });
+
+  it("enters a dungeon from an event and preserves the main map return point", () => {
+    const run = makeEventRun("enterDungeon");
+    run.activeEvent!.choices[0].dungeonThreat = 4;
+    const mainMap = JSON.parse(JSON.stringify(run.map));
+
+    const next = applyEventChoice(run, "choice");
+
+    expect(next.screen).toBe("map");
+    expect(next.currentNodeId).toBe("dungeon-start");
+    expect(next.dungeon?.returnNodeId).toBe("current-node");
+    expect(next.dungeon?.returnMap).toEqual(mainMap);
+    expect(next.dungeon?.threatIncrease).toBe(4);
+    expect(next.map.some((node) => node.type === "exit")).toBe(true);
+    expect(next.map.some((node) => node.id === "dungeon-boss")).toBe(true);
+    expect(next.threat).toBe(run.threat);
+  });
+
+  it("does not raise threat for dungeon movement", () => {
+    const run = applyEventChoice(makeEventRun("enterDungeon"), "choice");
+    const start = run.map.find((node) => node.id === "dungeon-start")!;
+    const threat = run.threat;
+
+    const next = moveToNode(run, start.neighbors[0]);
+
+    expect(next.threat).toBe(threat);
+    expect(next.movesTaken).toBe(run.movesTaken + 1);
+  });
+
+  it("returns from a dungeon exit, completes the entry event, and applies the stored threat", () => {
+    let run = makeEventRun("enterDungeon");
+    run.activeEvent!.choices[0].dungeonThreat = 5;
+    run = applyEventChoice(run, "choice");
+    const exit = run.map.find((node) => node.type === "exit")!;
+    const feeder = run.map.find((node) => node.neighbors.includes(exit.id) && node.id !== "dungeon-boss")!;
+    run.currentNodeId = feeder.id;
+    exit.visible = true;
+    const threat = run.threat;
+
+    const next = moveToNode(run, exit.id);
+
+    expect(next.dungeon).toBeUndefined();
+    expect(next.screen).toBe("map");
+    expect(next.currentNodeId).toBe("current-node");
+    expect(next.threat).toBe(threat + 5);
+    expect(next.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
+
+  it("returns from a dungeon boss with card, gold, and relic rewards before completing the entry event", () => {
+    let run = makeEventRun("enterDungeon");
+    run.activeEvent!.choices[0].dungeonThreat = 3;
+    run = applyEventChoice(run, "choice");
+    const gold = run.player.gold;
+    const threat = run.threat;
+    run.screen = "combat";
+    run.currentNodeId = "dungeon-boss";
+    run.combat = makeSingleHpCombat(run.map.find((node) => node.id === "dungeon-boss")?.encounterId ?? "heart");
+
+    run = playCard(run, "card-1", "enemy-1");
+
+    expect(run.dungeon).toBeUndefined();
+    expect(run.screen).toBe("reward");
+    expect(run.currentNodeId).toBe("current-node");
+    expect(run.threat).toBe(threat + 3);
+    expect(run.pendingReward?.source).toBe("dungeonBoss");
+    expect(run.pendingReward?.cards).toHaveLength(3);
+    expect(run.pendingReward?.relicId).toBeTruthy();
+    expect(run.player.gold).toBeGreaterThan(gold);
+    expect(run.map.find((node) => node.id === "current-node")?.completed).toBe(false);
+
+    const relicId = run.pendingReward?.relicId!;
+    const completed = chooseRewardCard(run);
+
+    expect(completed.screen).toBe("map");
+    expect(completed.relics).toContain(relicId);
+    expect(completed.map.find((node) => node.id === "current-node")?.completed).toBe(true);
+  });
+
+  it("saves and loads an active dungeon context", () => {
+    const run = applyEventChoice(makeEventRun("enterDungeon"), "choice");
+
+    saveRun(run);
+    const loaded = loadRun();
+
+    expect(loaded?.saveVersion).toBe(SAVE_VERSION);
+    expect(loaded?.currentNodeId).toBe("dungeon-start");
+    expect(loaded?.dungeon?.returnNodeId).toBe("current-node");
+    expect(loaded?.map.some((node) => node.type === "exit")).toBe(true);
+  });
 });
 
 describe("content packs", () => {
   it("accepts the default content pack", () => {
     expect(validateContentPack(defaultContentPack).valid).toBe(true);
+  });
+
+  it("contains the planned expansion card counts and manual choice cards", () => {
+    const expansionCards = expansionCardIds.map((id) => defaultContentPack.cards[id]);
+    expect(expansionCards.every(Boolean)).toBe(true);
+    expect(expansionCards).toHaveLength(90);
+    expect(expansionCards.filter((card) => card.rarity === "common")).toHaveLength(40);
+    expect(expansionCards.filter((card) => card.rarity === "uncommon")).toHaveLength(30);
+    expect(expansionCards.filter((card) => card.rarity === "rare")).toHaveLength(20);
+    expect(expansionCards.filter((card) => card.cost === 4)).toHaveLength(5);
+    expect(expansionCards.filter((card) => [...card.effects, ...card.upgradedEffects].some((effect) => effect.selection === "manual"))).toHaveLength(14);
   });
 
   it("loads default content without a draft and falls back from invalid draft data", () => {
@@ -884,6 +1092,25 @@ function makeShuffleRun(): RunState {
     { uid: "shuffle-5", cardId: "quick_cut", upgraded: false }
   ];
   run.combat!.enemies = [makeEnemy({ intent: { id: "wait", intent: "defend", label: "Wait", effects: [] } })];
+  return run;
+}
+
+function makeDefaultCardRun(cardIds: string[]): RunState {
+  const run = newRun(303);
+  run.screen = "combat";
+  run.contentPack = JSON.parse(JSON.stringify(defaultContentPack)) as typeof defaultContentPack;
+  run.combat = {
+    enemies: [makeEnemy()],
+    drawPile: [],
+    hand: cardIds.map((cardId, index) => ({ uid: `card-${index + 1}`, cardId, upgraded: false })),
+    discardPile: [],
+    exhaustPile: [],
+    turn: 1,
+    log: [],
+    oncePerCombatKeys: [],
+    activePowers: []
+  };
+  run.player.energy = run.player.maxEnergy;
   return run;
 }
 

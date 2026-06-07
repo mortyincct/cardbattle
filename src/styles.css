@@ -295,6 +295,10 @@ h2 {
   color: #e9c968;
 }
 
+.node.exit {
+  color: #8ee6c8;
+}
+
 .panel {
   min-height: 360px;
   padding: 16px;
@@ -326,6 +330,11 @@ h2 {
 
 .card.power {
   border-color: rgba(202, 158, 91, 0.58);
+}
+
+.card.selected {
+  border-color: rgba(237, 205, 126, 0.95);
+  box-shadow: 0 0 0 2px rgba(237, 205, 126, 0.22);
 }
 
 .card:disabled {
@@ -675,6 +684,20 @@ h2 {
   margin-left: auto;
   padding: 10px 16px;
   background: #765139;
+}
+
+.choiceBanner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(237, 205, 126, 0.24);
+  background: rgba(56, 45, 28, 0.86);
+}
+
+.choiceBanner .wideButton {
+  width: auto;
+  margin-left: auto;
 }
 
 .combatMain {

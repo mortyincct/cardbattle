@@ -1,18 +1,23 @@
 import { Activity, CircleDot, Coins, Crown, Database, Flame, Gem, Heart, HelpCircle, Map, Play, RotateCcw, Shield, ShoppingBag, Swords, Zap } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cards, loadContentPack } from "../game/content";
-import { applyEventChoice, buyFromShop, cardDefFrom, chooseRewardCard, claimTreasure, clearSave, endTurn, loadRun, moveToNode, newRun, playCard, restAtCampfire, saveRun, shopService } from "../game/state";
-import type { CardInstance, ContentPack, EnemyState, MapNode, RunState } from "../game/types";
+import { applyEventChoice, buyFromShop, cardCostFrom, cardDefFrom, chooseRewardCard, claimTreasure, clearSave, completeCardChoice, endTurn, loadRun, moveToNode, newRun, playCard, restAtCampfire, saveRun, shopService } from "../game/state";
+import type { CardFilter, CardInstance, ContentPack, EnemyState, MapNode, RunState } from "../game/types";
 import { ContentEditor } from "./ContentEditor";
 
 export function App() {
   const [run, setRun] = useState<RunState>(() => loadRun() ?? newRun());
   const [mode, setMode] = useState<"game" | "editor">("game");
   const [selectedEnemy, setSelectedEnemy] = useState<string | undefined>();
+  const [selectedCards, setSelectedCards] = useState<string[]>([]);
 
   useEffect(() => {
     if (run.screen !== "gameover") saveRun(run);
   }, [run]);
+
+  useEffect(() => {
+    if (!run.combat?.pendingCardChoice) setSelectedCards([]);
+  }, [run.combat?.pendingCardChoice]);
 
   const currentNode = useMemo(() => run.map.find((node) => node.id === run.currentNodeId), [run]);
   const selectedTarget = run.combat?.enemies.find((enemy) => enemy.instanceId === selectedEnemy) ?? run.combat?.enemies[0];
@@ -53,11 +58,22 @@ export function App() {
       <section className="statusLine">
         <span>{run.message}</span>
         <span>当前位置：{labelNode(currentNode, pack)}</span>
+        {run.dungeon ? <span>副本：完成后威胁 +{run.dungeon.threatIncrease}</span> : null}
         <span>下一层敌人：生命 +{Math.round((run.threat + 1) * 7.5)}% / 伤害 +{Math.round((run.threat + 1) * 5.5)}%</span>
       </section>
 
       {run.screen === "combat" && run.combat ? (
-        <CombatView run={run} pack={pack} selectedEnemy={selectedTarget} onSelectEnemy={setSelectedEnemy} onPlay={(card) => setRun(playCard(run, card.uid, selectedTarget?.instanceId))} onEndTurn={() => setRun(endTurn(run))} />
+        <CombatView
+          run={run}
+          pack={pack}
+          selectedEnemy={selectedTarget}
+          selectedCards={selectedCards}
+          onSelectEnemy={setSelectedEnemy}
+          onSelectCard={setSelectedCards}
+          onConfirmCardChoice={() => setRun(completeCardChoice(run, selectedCards))}
+          onPlay={(card) => setRun(playCard(run, card.uid, selectedTarget?.instanceId))}
+          onEndTurn={() => setRun(endTurn(run))}
+        />
       ) : (
         <div className="layout">
           <MapView run={run} pack={pack} onMove={(nodeId) => setRun(moveToNode(run, nodeId))} />
@@ -116,9 +132,11 @@ function MapView({ run, pack, onMove }: { run: RunState; pack: ContentPack; onMo
 
 function SidePanel({ run, pack, setRun, reset }: { run: RunState; pack: ContentPack; setRun: (run: RunState) => void; reset: () => void }) {
   if (run.screen === "reward" && run.pendingReward?.cards) {
+    const rewardRelic = run.pendingReward.relicId ? pack.relics[run.pendingReward.relicId] : undefined;
     return (
       <Panel title="卡牌奖励">
-        <p>战斗金币：{run.pendingReward.amount}</p>
+        <p>{run.pendingReward.source === "dungeonBoss" ? "副本金币" : "战斗金币"}：{run.pendingReward.amount}</p>
+        {rewardRelic ? <p>宝箱：{rewardRelic.name}</p> : null}
         <div className="cardGrid">{run.pendingReward.cards.map((card) => <CardButton key={card.uid} pack={pack} card={card} onClick={() => setRun(chooseRewardCard(run, card.uid))} />)}</div>
         <button className="wideButton" onClick={() => setRun(chooseRewardCard(run))}>跳过卡牌</button>
       </Panel>
@@ -179,8 +197,31 @@ function SidePanel({ run, pack, setRun, reset }: { run: RunState; pack: ContentP
   );
 }
 
-function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn }: { run: RunState; pack: ContentPack; selectedEnemy?: EnemyState; onSelectEnemy: (id: string) => void; onPlay: (card: CardInstance) => void; onEndTurn: () => void }) {
+function CombatView({
+  run,
+  pack,
+  selectedEnemy,
+  selectedCards,
+  onSelectEnemy,
+  onSelectCard,
+  onConfirmCardChoice,
+  onPlay,
+  onEndTurn
+}: {
+  run: RunState;
+  pack: ContentPack;
+  selectedEnemy?: EnemyState;
+  selectedCards: string[];
+  onSelectEnemy: (id: string) => void;
+  onSelectCard: (ids: string[]) => void;
+  onConfirmCardChoice: () => void;
+  onPlay: (card: CardInstance) => void;
+  onEndTurn: () => void;
+}) {
   const combat = run.combat!;
+  const pending = combat.pendingCardChoice;
+  const choiceVerb = pending?.toZone === "exhaustPile" ? "消耗" : "弃掉";
+  const choiceCount = pending ? Math.min(pending.amount, combat.hand.filter((card) => cardMatchesChoice(card, pack, pending.cardFilter)).length) : 0;
   return (
     <section className="combat">
       <div className="enemyRow">
@@ -201,15 +242,41 @@ function CombatView({ run, pack, selectedEnemy, onSelectEnemy, onPlay, onEndTurn
         <Meter icon={<Zap />} label="魔甲" value={run.player.magicArmor} tone="gold" />
         <Meter icon={<Zap />} label="能量" value={`${run.player.energy}/${run.player.maxEnergy}`} tone="gold" />
         <StatusList statuses={run.player.statuses} />
-        <button className="endTurn" onClick={onEndTurn}>结束回合</button>
+        <button className="endTurn" disabled={Boolean(pending)} onClick={onEndTurn}>结束回合</button>
       </div>
+      {pending ? (
+        <div className="choiceBanner">
+          <strong>选择要{choiceVerb}的牌</strong>
+          <span>{selectedCards.length}/{choiceCount}</span>
+          <button className="wideButton" disabled={selectedCards.length < choiceCount} onClick={onConfirmCardChoice}>确认</button>
+        </div>
+      ) : null}
       <div className="combatMain">
         <div className="hand">
           {combat.hand.map((card) => {
             const def = cardDefFrom(card, pack);
-            const cost = card.cost ?? def.cost;
-            const disabled = cost > run.player.energy || def.type === "status" || def.type === "curse";
-            return <CardButton key={card.uid} pack={pack} card={card} disabled={disabled} onClick={() => onPlay(card)} />;
+            const cost = cardCostFrom(card, pack);
+            const selected = selectedCards.includes(card.uid);
+            const selectable = pending ? cardMatchesChoice(card, pack, pending.cardFilter) : false;
+            const disabled = pending ? !selectable : cost > run.player.energy || def.type === "status" || def.type === "curse";
+            return (
+              <CardButton
+                key={card.uid}
+                pack={pack}
+                card={card}
+                selected={selected}
+                disabled={disabled}
+                onClick={() => {
+                  if (!pending) {
+                    onPlay(card);
+                    return;
+                  }
+                  if (!selectable) return;
+                  if (selected) onSelectCard(selectedCards.filter((id) => id !== card.uid));
+                  else if (selectedCards.length < choiceCount) onSelectCard([...selectedCards, card.uid]);
+                }}
+              />
+            );
           })}
         </div>
         <CombatLog log={combat.log} />
@@ -233,17 +300,25 @@ function CombatLog({ log }: { log: string[] }) {
   );
 }
 
-function CardButton({ card, pack, onClick, disabled, price }: { card: CardInstance; pack: ContentPack; onClick: () => void; disabled?: boolean; price?: number }) {
+function CardButton({ card, pack, onClick, disabled, price, selected }: { card: CardInstance; pack: ContentPack; onClick: () => void; disabled?: boolean; price?: number; selected?: boolean }) {
   const def = cardDefFrom(card, pack);
   return (
-    <button className={`card ${def.type}`} onClick={onClick} disabled={disabled}>
-      <span className="cost">{card.cost ?? def.cost}</span>
+    <button className={`card ${def.type} ${selected ? "selected" : ""}`} onClick={onClick} disabled={disabled}>
+      <span className="cost">{cardCostFrom(card, pack)}</span>
       <strong>{def.name}{card.upgraded ? "+" : ""}</strong>
       <small>{cardTypeLabel(def.type)} / {rarityLabel(def.rarity)}</small>
       <p>{card.upgraded ? def.upgradedDescription : def.description}</p>
       {price ? <em>{price} 金币</em> : null}
     </button>
   );
+}
+
+function cardMatchesChoice(card: CardInstance, pack: ContentPack, filter: CardFilter) {
+  const def = cardDefFrom(card, pack);
+  if (filter === "any") return true;
+  if (filter === "upgraded") return card.upgraded;
+  if (filter === "notUpgraded") return !card.upgraded;
+  return def.type === filter || def.rarity === filter;
 }
 
 function DeckList({ deck, pack }: { deck: CardInstance[]; pack: ContentPack }) {
@@ -300,7 +375,8 @@ function nodeIcon(type: string) {
     campfire: <Flame />,
     shop: <ShoppingBag />,
     treasure: <Gem />,
-    boss: <Crown />
+    boss: <Crown />,
+    exit: <Map />
   };
   return icons[type] ?? <CircleDot />;
 }
@@ -314,7 +390,8 @@ function nodeTypeLabel(type: string) {
     campfire: "营火",
     shop: "商店",
     treasure: "宝箱",
-    boss: "首领"
+    boss: "首领",
+    exit: "出口"
   };
   return labels[type] ?? "未知";
 }
